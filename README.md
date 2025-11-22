@@ -1,2 +1,2 @@
-# First_git
-This is my first git, and am about to learn how to use git and github
+# Smartgrid Project
+College Major Project on Cybersecurity to smartgrid
