@@ -49,6 +49,10 @@ class OperatorDashboardApp:
         self.active_blackouts = {}
         self.blackout_default_duration = 20.0  # seconds (need to change to take input from user)
 
+        # NEW: Logging system defaults
+        self.attack_console_max_lines = 2000
+        self.attack_log_file = None
+
         # Calls styling and widget creation function
         self._setup_styles()
         self.create_widgets()
@@ -454,7 +458,10 @@ class OperatorDashboardApp:
             height=12,
             bg=attack_bg,
             fg=attack_fg,
-            font=(self.font_mono.actual("family"), 10)
+            font=(self.font_mono.actual("family"), 10),
+            wrap = "word",
+            padx = 6, pady = 4,
+            borderwidth = 0
         )
         self.attack_console.pack(fill="both", expand=True)
 
@@ -468,19 +475,208 @@ class OperatorDashboardApp:
     # ---------------------------
     # UI helpers & logging
     # ---------------------------
-    def _draw_light_indicator(self, canvas, color):
-        canvas.delete("all")
-        canvas.create_oval(2, 2, 26, 26, outline="#7f8c8d", width=1)
-        canvas.create_oval(5, 5, 23, 23, fill=color, outline=color)
+    def _draw_light_indicator(self,
+                          canvas: tk.Canvas,
+                          color: str,
+                          size: int = 28,
+                          border: str = "#7f8c8d",
+                          outline_width: int = 1,
+                          glow: bool = False,
+                          blink: bool = False,
+                          blink_interval: int = 600):
+        # Cancel any previous blink job stored on the canvas
+        try:
+            if hasattr(canvas, "_blink_job") and canvas._blink_job is not None:
+                canvas.after_cancel(canvas._blink_job)
+                canvas._blink_job = None
+        except Exception:
+            pass
+
+        # Compute coordinates with a small padding
+        padding = 2
+        w = size
+        h = size
+        x0, y0 = padding, padding
+        x1, y1 = padding + w, padding + h
+
+        # Keep consistent tag names so we can update/replace only those items
+        tag_outer = "indicator_outer"
+        tag_inner = "indicator_inner"
+        tag_glow = "indicator_glow"
+
+        # Remove previous indicator drawings only (don't clear entire canvas)
+        canvas.delete(tag_outer)
+        canvas.delete(tag_inner)
+        canvas.delete(tag_glow)
+
+        # Outer ring (frame)
+        canvas.create_oval(x0, y0, x1, y1, outline=border, width=outline_width, tags=(tag_outer,))
+
+        # Inner filled circle with small inset
+        inset = max(3, int(size * 0.18))
+        canvas.create_oval(x0 + inset, y0 + inset, x1 - inset, y1 - inset,
+                        fill=color, outline=color, tags=(tag_inner,))
+
+        # Optional glow: draw a larger, low-opacity-like ring (Tk doesn't support alpha)
+        # So we simulate a glow by drawing a slightly larger ring with a lighter color.
+        if glow:
+            try:
+                glow_amount = 0.08  # small lightening factor
+                lighter = self._lighten_color(color, glow_amount)  # assumes you have _lighten_color
+            except Exception:
+                lighter = color
+            glow_padding = max(1, int(size * 0.08))
+            canvas.create_oval(x0 - glow_padding, y0 - glow_padding,
+                               x1 + glow_padding, y1 + glow_padding,
+                               outline=lighter, width=max(1, outline_width), tags=(tag_glow,))
+
+        # Resize the canvas to fit the indicator if necessary
+        try:
+            canvas.config(width=size + padding*2, height=size + padding*2)
+        except Exception:
+            pass
+
+        # Blink animation (toggle inner circle visibility)
+        if blink:
+            # initial visible state
+            canvas.itemconfigure(tag_inner, state="normal")
+
+            def _toggle_blink():
+                cur_state = canvas.itemcget(tag_inner, "state")
+                new_state = "hidden" if cur_state == "normal" else "normal"
+                try:
+                    canvas.itemconfigure(tag_inner, state=new_state)
+                except Exception:
+                    pass
+                # schedule next toggle and remember job id on canvas
+                canvas._blink_job = canvas.after(blink_interval, _toggle_blink)
+
+            # start toggling
+            canvas._blink_job = canvas.after(blink_interval, _toggle_blink)
+        else:
+            # Ensure inner item is visible if not blinking
+            try:
+                canvas.itemconfigure(tag_inner, state="normal")
+            except Exception:
+                pass
+            canvas._blink_job = None
+
+        # Optional: return the tag names or the ids if caller wants them
+        return {"outer_tag": tag_outer, "inner_tag": tag_inner, "glow_tag": tag_glow}
 
     def _append_attack_log(self, msg):
+        """
+        Deprecated helper kept for compatibility.
+        Delegates to append_attack_log which is thread-safe.
+        """
+        self.append_attack_log(msg, level="INFO")
+    
+    def append_attack_log(self, msg: str, level: str = "INFO"):
+        """
+        Public, thread-safe method to append a log line to the attack console.
+        Safe to call from background threads. level: "INFO","WARNING","ERROR","CRITICAL","DEFENSE".
+        """
         ts = datetime.now().strftime("%H:%M:%S")
-        self.attack_console.insert("end", f"[{ts}] {msg}\n")
-        self.attack_console.see("end")
+        text = f"[{ts}] {msg}\n"
+
+        try:
+            # If already on GUI thread, insert directly (faster)
+            if threading.current_thread() is threading.main_thread():
+                self._insert_attack_text(text, level)
+            else:
+            # schedule insertion on GUI thread
+                self.root.after(0, self._insert_attack_text, text, level)
+        except Exception:
+            # best effort fallback: try scheduling, otherwise print to stdout so logs aren't lost
+            try:
+                self.root.after(0, self._insert_attack_text, text, level)
+            except Exception:
+                print(text, end="")
+    def _insert_attack_text(self, text: str, level: str):
+        """
+        Inserts text into the ScrolledText attack console.
+        Must run on GUI thread. Handles tag setup, trimming and optional file write.
+        """
+        # lazy tag configuration
+        if not getattr(self, "_attack_console_tags_configured", False):
+            try:
+                self.attack_console.tag_configure("INFO", foreground=getattr(self, "attack_fg", "#f39c12"))
+                self.attack_console.tag_configure("DEFENSE", foreground="#9b59b6")
+                self.attack_console.tag_configure("WARNING", foreground="#f39c12")
+                # ERROR and CRITICAL get bolder font; font_mono should exist from _setup_styles
+                self.attack_console.tag_configure(
+                    "ERROR",
+                    foreground="#e74c3c",
+                    font=(self.font_mono.actual("family"), 10, "bold")
+                )
+                self.attack_console.tag_configure(
+                    "CRITICAL",
+                    foreground="#ffffff",
+                    background="#c0392b",
+                    font=(self.font_mono.actual("family"), 10, "bold")
+                )
+            except Exception:
+                # tag config may fail in some headless/test environments; ignore
+                pass
+            self._attack_console_tags_configured = True
+
+        # enable, insert, disable — keep the widget read-only for users
+        try:
+            self.attack_console.configure(state="normal")
+        except Exception:
+            pass
+
+        tag = (level or "INFO").upper() if isinstance(level, str) else "INFO"
+        if tag not in ("INFO", "DEFENSE", "WARNING", "ERROR", "CRITICAL"):
+            tag = "INFO"
+
+        try:
+            # preferred: insert with tag (colored)
+            self.attack_console.insert("end", text, tag)
+            self.attack_console.see("end")
+        except Exception:
+            # fallback: try without tag
+            try:
+                self.attack_console.insert("end", text)
+                self.attack_console.see("end")
+            except Exception:
+                # ultimate fallback: print to stdout
+                print(text, end="")
+
+        # trim old lines to keep the widget responsive
+        try:
+            max_lines = int(getattr(self, "attack_console_max_lines", 2000) or 2000)
+            idx = self.attack_console.index("end-1c")
+            if isinstance(idx, str) and "." in idx:
+                num_lines = int(idx.split(".")[0])
+            else:
+                num_lines = 1
+            if num_lines > max_lines:
+                self.attack_console.delete("1.0", f"{num_lines - max_lines + 1}.0")
+        except Exception:
+            pass
+
+        try:
+            self.attack_console.configure(state="disabled")
+        except Exception:
+            pass
+
+        # optional persistent logging
+        logfile = getattr(self, "attack_log_file", None)
+        if logfile:
+            try:
+                with open(logfile, "a", encoding="utf-8") as f:
+                    f.write(text)
+            except Exception:
+                pass
 
     def log_attack_action(self, msg):
-        # route defense messages here as well (defense log removed)
-        self._append_attack_log(msg)
+        """
+        Route defense messages here as well.
+        Uses the thread-safe append_attack_log so callers from background threads are safe.
+        """
+        # defense messages use a separate tag
+        self.append_attack_log(msg, level="DEFENSE")
 
     # ---------------------------
     # Commands: send to firebase
