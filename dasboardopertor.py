@@ -1,17 +1,27 @@
+# Import statements: Loads UI library (Tkinter + themed widgets), HTTP requests library, 
+# threading/queue/time utilities, and date/time helpers.
+
 import tkinter as tk
 from tkinter import ttk, scrolledtext
+from tkinter import font as tkfont
 import requests
 import threading
 import queue
 import time
-from datetime import datetime, timedelta
+import sys
+from datetime import datetime, timedelta, timezone
+from typing import Dict,Any, Optional
+from requests import Session, RequestException
+from json import JSONDecodeError
 
 # --- Configuration ---
-FIREBASE_URL = "https://trip-a155a-default-rtdb.asia-southeast1.firebasedatabase.app/"
-COMMAND_ENDPOINT = FIREBASE_URL + "command.json"
-STATUS_ENDPOINT = FIREBASE_URL + "status.json"
+FIREBASE_URL = "https://trip-a155a-default-rtdb.asia-southeast1.firebasedatabase.app/" # Firebase url
+COMMAND_ENDPOINT = FIREBASE_URL + "command.json" # Adds command.json to the end of firebase url
+STATUS_ENDPOINT = FIREBASE_URL + "status.json" # Adds status.json to the end of firebase url
 
 # DEFENSES
+# Small dict mapping three defense names to a label and emoji icon.
+# This part of code is displayed in Defense toggle
 DEFENSE_INFO = {
     "authentication": {"title": "Authentication Gateway", "icon": "🔑"},
     "replay": {"title": "Temporal Firewall", "icon": "⏳"},
@@ -20,93 +30,324 @@ DEFENSE_INFO = {
 
 class OperatorDashboardApp:
     def __init__(self, root):
+        # Saves root (Tk window), sets title/size/background.
         self.root = root
         self.root.title("OPERATOR DASHBOARD [SECURE TERMINAL]")
         self.root.geometry("1200x820")
         self.root.configure(bg="#2c3e50")
 
+        # Creates request_queue (priority queue) for outbound commands and 
+        # response_queue for inbound data from network thread.
         self.request_queue = queue.PriorityQueue()
         self.response_queue = queue.Queue()
+        # is_running controls the background thread.
         self.is_running = True
+        # auth_token is the token placed into outgoing payloads.
         self.auth_token = "SECURE_TOKEN_123"
 
-        # Active blackouts: meterID -> expiry datetime
+        # Active blackouts: stores meterID -> expiry datetime
         self.active_blackouts = {}
-        self.blackout_default_duration = 20.0  # seconds
+        self.blackout_default_duration = 20.0  # seconds (need to change to take input from user)
 
+        # Calls styling and widget creation function
         self._setup_styles()
         self.create_widgets()
 
         # Network thread
+        # Starts a background network_thread (daemon) to handle HTTP I/O.
         self.network_thread = threading.Thread(target=self.network_worker, daemon=True)
         self.network_thread.start()
 
         # process responses and cleanup loops
-        self.process_response_queue()
-        self.root.after(1000, self._cleanup_blackouts_loop)
+        self.process_response_queue() # Starts loop (runs every 100ms) to handle responses
+        self.root.after(1000, self._cleanup_blackouts_loop) # Expires blackout
 
+        # used to close tkinter window by clicking X(close) button
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     # ---------------------------
     # Payload and network
     # ---------------------------
-    def _create_payload(self, command, targetID="", value=0.0):
-        return {
+    # Creates JSON payload to send to Firebase
+    def _create_payload(self, command: str, targetID: str="", value: float | int =0.0, include_epoch: bool = True) -> Dict[str, Any]: # Defines a method
+        if not isinstance(command, str) or not command: # Check if command is valid string
+            raise ValueError("command must be a non-empty string")
+
+        try:
+            value_f = float(value) # Convert value to float
+        except (TypeError, ValueError):
+            raise ValueError("value must be convertible to float")
+
+        now = datetime.now(timezone.utc) # Get current time with timezone
+        payload = { # Creates dictionary
             "command": command,
             "targetID": targetID,
-            "value": float(value),
-            "authToken": self.auth_token,
-            "timestamp": datetime.now().timestamp(),
+            "value": value_f,
+            "authToken": getattr(self, "auth_token", None),
+            "timestamp_iso": now.isoformat(),          # readable and timezone-aware
             "fromOperator": True,
             "hash": "DISABLED"
         }
+        if include_epoch: # Adds epoch timestamp if needed
+            payload["timestamp_epoch"] = now.timestamp()
 
-    def network_worker(self):
-        last_poll_time = 0
-        while self.is_running:
-            try:
-                # send queued commands
+        return payload
+
+    def network_worker(self): # Function runs in background
+        # Configurable parameters with same defaults
+        poll_interval = getattr(self, "net_poll_interval", 0.5)       # seconds between polls
+        send_timeout = getattr(self, "send_timeout", 3.0)             # timeout for PUT
+        status_timeout = getattr(self, "status_timeout", 2.0)         # timeout for GET status
+        max_send_retries = getattr(self, "max_send_retries", 2)       # retries for sending
+        queue_get_timeout = getattr(self, "queue_get_timeout", 0.2)   # short blocking wait
+        retry_base_delay = getattr(self, "retry_base_delay", 0.25)    # base backoff seconds
+        requeue_on_fail = getattr(self, "requeue_on_fail", True)     # whether to requeue failed payloads
+
+        last_poll_time = 0.0
+        session = Session()  # connection pooling
+
+        try:
+            while getattr(self, "is_running", False):
+                # allow external stop_event if provided (faster shutdown)
+                stop_event = getattr(self, "stop_event", None)
+                if stop_event is not None and stop_event.is_set():
+                    break
+
+                # 1) Send one queued command (non-blocking-ish)
                 try:
-                    _priority, payload = self.request_queue.get(block=False)
-                    try:
-                        requests.put(COMMAND_ENDPOINT, json=payload, timeout=3)
-                    except Exception as e:
-                        # network error while sending — show in attack console
-                        self.log_attack_action(f"Send Error: {e}")
+                    # small timeout so we can periodically check is_running/polling
+                    item = self.request_queue.get(timeout=queue_get_timeout)
                 except queue.Empty:
-                    pass
+                    item = None
 
-                # poll status periodically
-                if time.time() - last_poll_time > 0.5:
-                    last_poll_time = time.time()
+                if item is not None:
                     try:
-                        resp = requests.get(STATUS_ENDPOINT, timeout=2)
-                        if resp.status_code == 200:
-                            self.response_queue.put(resp.json())
+                        # If using a PriorityQueue it will be (priority, payload)
+                        if isinstance(item, tuple) and len(item) >= 2:
+                            _, payload = item[0], item[1]  # tolerate priority or (prio, payload)
+                        # if queue.item is (prio,payload) but sometimes user enqueued differently:
+                            if len(item) >= 2:
+                                payload = item[1]
+                        else:
+                            payload = item  # fallback: item itself
+                    except Exception:
+                        payload = item  # be forgiving
+
+                    # send with limited retries + exponential backoff
+                    success = False
+                    attempt = 0
+                    while attempt <= max_send_retries and not success and getattr(self, "is_running", False):
+                        try:
+                            attempt += 1
+                            session.put(getattr(self, "COMMAND_ENDPOINT"), json=payload, timeout=send_timeout)
+                            success = True
+                        except RequestException as e:
+                            # network/transient error
+                            self.log_attack_action(f"Send Error (attempt {attempt}): {e}")
+                            if attempt <= max_send_retries:
+                                # exponential backoff
+                                delay = retry_base_delay * (2 ** (attempt - 1))
+                                time.sleep(delay)
+                            else:
+                                # exhausted retries
+                                if requeue_on_fail:
+                                    try:
+                                        # requeue at end (no priority)
+                                        self.request_queue.put((9999, payload))
+                                    except Exception:
+                                        # if requeue fails, log and drop
+                                        self.log_attack_action("Failed to requeue payload after retries")
+                                # not raising here — continue main loop
+
+                    # if using task_done pattern (producer used join()), call task_done
+                    try:
+                        self.request_queue.task_done()
                     except Exception:
                         pass
 
-                time.sleep(0.05)
+                # 2) Poll status endpoint at configured interval
+                now = time.monotonic()
+                if now - last_poll_time >= poll_interval:
+                    last_poll_time = now
+                    try:
+                        resp = session.get(getattr(self, "STATUS_ENDPOINT"), timeout=status_timeout)
+                        if resp.status_code == 200:
+                            try:
+                                data = resp.json()
+                                # push to response queue without blocking indefinitely
+                                try:
+                                    self.response_queue.put_nowait(data)
+                                except queue.Full:
+                                    # if response queue is full, drop and log (or block briefly if you prefer)
+                                    self.log_attack_action("Response queue full — dropping status update")
+                            except JSONDecodeError:
+                                self.log_attack_action("Status response JSON decode error")
+                        else:
+                            # non-200 response: optionally log
+                            self.log_attack_action(f"Status poll returned code {resp.status_code}")
+                    except RequestException as e:
+                        # network error while polling: log at debug/info level
+                        # avoid noisy repeated logs; consider tracking consecutive failures to throttle
+                        self.log_attack_action(f"Status poll error: {e}")
+
+                # 3) Sleep a short time to yield CPU (avoid 100% busy loop)
+                # We already used blocking queue.get(timeout=...) which will sleep,
+                # but adding a small sleep here reduces tight loop in case of many iterations.
+                time.sleep(0.02)
+
+        except Exception as ex:
+            # Last-resort safety — log the exception and exit the thread loop after a short pause.
+            try:
+                self.log_attack_action(f"Network worker unhandled exception: {ex}")
             except Exception:
-                time.sleep(1)
+                pass
+            # small sleep before stopping to avoid crash-loop
+            time.sleep(1)
+        finally:
+            # cleanup session
+            try:
+                session.close()
+            except Exception:
+                pass
 
     # ---------------------------
     # UI creation (single tab)
     # ---------------------------
-    def _setup_styles(self):
+    def _setup_styles(self) -> Dict[str, object]:
+        # ---- style & theme ----
         self.style = ttk.Style()
-        self.style.theme_use("clam")
-        self.bg_color = "#ecf0f1"
-        self.style.configure(".", background=self.bg_color)
-        self.style.configure("TLabel", background=self.bg_color, font=("Segoe UI", 10))
-        self.style.configure("TButton", font=("Segoe UI", 10, "bold"))
-        self.style.configure("Value.TLabel", font=("Consolas", 14, "bold"), foreground="#2980b9")
+
+        # prefer "clam" but fall back to a safe available theme
+        preferred = "clam"
+        available = self.style.theme_names()
+        if preferred in available:
+            try:
+                self.style.theme_use(preferred)
+            except Exception:
+                # some platforms/themes may raise — fall back to default
+                self.style.theme_use(self.style.theme_use())
+        else:
+            # choose a safe theme (first available)
+            self.style.theme_use(available[0])
+
+        # ---- colors ----
+        self.bg_color = "#ecf0f1"       # main background
+        self.accent_color = "#2980b9"   # accent / value color
+        self.fg_color = "#333333"       # default foreground for labels
+
+        # ---- fonts (use system-appropriate fallbacks) ----
+        if sys.platform.startswith("win"):
+            ui_font_family = "Segoe UI"
+        elif sys.platform == "darwin":
+            ui_font_family = "Helvetica"   # San Francisco isn't always exposed directly
+        else:
+            ui_font_family = "DejaVu Sans"  # common Linux fallback
+
+        # create Font objects (lets Tk handle DPI scaling)
+        self.font_ui = tkfont.Font(family=ui_font_family, size=10)
+        self.font_ui_bold = tkfont.Font(family=ui_font_family, size=10, weight="bold")
+        self.font_mono = tkfont.Font(family="Consolas" if sys.platform.startswith("win") else "DejaVu Sans Mono", size=14, weight="bold")
+
+        # ---- base widget styles (explicit classes) ----
+        # Frame background
+        self.style.configure("TFrame", background=self.bg_color)
+
+        # Labels
+        self.style.configure("TLabel",
+                            background=self.bg_color,
+                            foreground=self.fg_color,
+                            font=self.font_ui)
+
+        # Buttons
+        self.style.configure("TButton",
+                            font=self.font_ui_bold,
+                            padding=(6, 4))  # give a bit of padding
+
+        # Button visual feedback (hover/active) - map uses theme element states
+        try:
+            self.style.map("TButton",
+                        foreground=[("active", self.fg_color), ("disabled", "#888")],
+                        background=[("active", "!disabled", self._lighten(self.bg_color, 0.03)),
+                                    ("pressed", "!disabled", self._lighten(self.bg_color, -0.03))])
+        except Exception:
+            # Some themes restrict background mapping, so ignore failures
+            pass
+
+        # Entry
+        self.style.configure("TEntry",
+                            fieldbackground="#ffffff",
+                            background="#ffffff",
+                            font=self.font_ui)
+
+        # Treeview (if used)
+        self.style.configure("Treeview",
+                            background="#ffffff",
+                            fieldbackground="#ffffff",
+                            font=self.font_ui)
+        self.style.configure("Treeview.Heading", font=self.font_ui_bold)
+
+        # Custom "Value" label style for big numeric values
+        self.style.configure("Value.TLabel",
+                            background=self.bg_color,
+                            font=self.font_mono,
+                            foreground=self.accent_color)
+
+        # Optional: set default padding for labels to make layout consistent
+        self.style.configure("TLabel", padding=(2, 2))
+
+        # Return commonly used constants for tests or for other parts of app
+        constants = {
+            "style": self.style,
+            "bg_color": self.bg_color,
+            "accent_color": self.accent_color,
+            "fg_color": self.fg_color,
+            "font_ui": self.font_ui,
+            "font_ui_bold": self.font_ui_bold,
+            "font_mono": self.font_mono
+        }
+        return constants
+
+    # Helper: small color adjuster (very tiny dependency, placed here for convenience)
+    def _hex_to_rgb(hexc: str):
+        hexc = hexc.lstrip("#")
+        return tuple(int(hexc[i:i+2], 16) for i in (0, 2, 4))
+
+    def _rgb_to_hex(rgb):
+        return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+    def _clamp(self, v, a=0, b=255):
+        return max(a, min(b, int(v)))
+
+    def _lighten_color(self, hexc: str, amount: float):
+        """
+        Lighten or darken hex color by a small amount (-0.5..0.5)
+        amount > 0 -> lighter, amount < 0 -> darker
+        """
+        hexc = hexc.lstrip("#")
+        r = int(hexc[0:2], 16)
+        g = int(hexc[2:4], 16)
+        b = int(hexc[4:6], 16)
+        r = self._clamp(r + (255 - r) * amount)
+        g = self._clamp(g + (255 - g) * amount)
+        b = self._clamp(b + (255 - b) * amount)
+        return "#{:02x}{:02x}{:02x}".format(r, g, b)
+
+# Attach helper to the module-level so _setup_styles can call it (or bind to self if you prefer)
+# If you place this method inside a class, implement self._lighten delegating to _lighten_color().
 
     def create_widgets(self):
+        PAD_X = 12
+        PAD_Y = 8
+        SMALL_PAD = 6
+        LABEL_WIDTH = 24
+        STATUS_WIDTH = 10
+        BTN_WIDTH = 10
+
+        # container
         container = ttk.Frame(self.root)
         container.pack(fill="both", expand=True, padx=12, pady=12)
 
-        # top area: left controls, right meters + consoles
+        # top area
         top = ttk.Frame(container)
         top.pack(fill="both", expand=False)
 
@@ -126,23 +367,30 @@ class OperatorDashboardApp:
         lc = ttk.LabelFrame(master_frame, text="Master Lighting Control", padding=8)
         lc.pack(fill="x", pady=(0,8))
 
+        # on indicator
         self.cv_on = tk.Canvas(lc, width=28, height=28, bg=self.bg_color, highlightthickness=0)
         self.cv_on.pack(side="left", padx=(6,8))
         self._draw_light_indicator(self.cv_on, "#bdc3c7")
 
-        ttk.Button(lc, text="ACTIVATE ALL LIGHTS", width=22, command=lambda: self.send_command("SET_LIGHTS", value=1.0)).pack(side="left", padx=6, pady=4)
+        ttk.Button(lc,
+                text="ACTIVATE ALL LIGHTS",
+                width=22,
+                command=lambda: self.send_command("SET_LIGHTS", value=1.0)).pack(side="left", padx=6, pady=4)
 
+        # off indicator
         self.cv_off = tk.Canvas(lc, width=28, height=28, bg=self.bg_color, highlightthickness=0)
         self.cv_off.pack(side="left", padx=(6,8))
         self._draw_light_indicator(self.cv_off, "#bdc3c7")
 
-        ttk.Button(lc, text="DEACTIVATE ALL LIGHTS", width=22, command=lambda: self.send_command("SET_LIGHTS", value=0.0)).pack(side="left", padx=6, pady=4)
+        ttk.Button(lc,
+                text="DEACTIVATE ALL LIGHTS",
+                width=22,
+                command=lambda: self.send_command("SET_LIGHTS", value=0.0)).pack(side="left", padx=6, pady=4)
 
-        # Defense buttons area (three buttons only as requested)
+        # Defense buttons
         def_frame = ttk.LabelFrame(master_frame, text="Defense Toggles", padding=8)
         def_frame.pack(fill="x", pady=(6,8))
 
-        # We'll create three toggle buttons and an indicator label for each
         self.def_buttons = {}
         self.def_labels = {}
 
@@ -150,21 +398,19 @@ class OperatorDashboardApp:
             sub = ttk.Frame(def_frame)
             sub.pack(fill="x", pady=4)
 
-            lbl_icon = ttk.Label(sub, text=f"{DEFENSE_INFO[key]['icon']} {DEFENSE_INFO[key]['title']}", width=24, anchor="w")
+            lbl_icon = ttk.Label(sub, text=f"{DEFENSE_INFO[key]['icon']} {DEFENSE_INFO[key]['title']}", width=LABEL_WIDTH, anchor="w")
             lbl_icon.pack(side="left")
 
-            # status label (ACTIVE/DISABLED)
-            st = ttk.Label(sub, text="UNKNOWN", width=10)
+            st = ttk.Label(sub, text="UNKNOWN", width=STATUS_WIDTH)
             st.pack(side="left", padx=(6,6))
             self.def_labels[key] = st
 
-            # toggle button
-            btn = ttk.Button(sub, text="Toggle", width=10, command=lambda k=key: self.send_command("SET_DEFENSE", targetID=k))
+            btn = ttk.Button(sub, text="Toggle", width=BTN_WIDTH, command=lambda k=key: self.send_command("SET_DEFENSE", targetID=k))
             btn.pack(side="right")
             self.def_buttons[key] = btn
 
         # -------------------------
-        # Right: Meters table + Attack console + Active Blackouts
+        # Right: Meters table + Attack console
         # -------------------------
         meters_frame = ttk.LabelFrame(right, text="Meters & Grid Status", padding=8)
         meters_frame.pack(fill="both", expand=True)
@@ -193,21 +439,31 @@ class OperatorDashboardApp:
         self.tree.heading("val", text="Load (kW)"); self.tree.column("val", width=120)
         self.tree.pack(fill="both", expand=False, pady=(0,8))
 
-        # bottom: attack console + active blackouts side-by-side
+        # bottom: attack console (no blackout panel)
         bottom = ttk.Frame(meters_frame)
         bottom.pack(fill="both", expand=True)
 
         attack_pan = ttk.LabelFrame(bottom, text="Attack Console", padding=6)
         attack_pan.pack(side="left", fill="both", expand=True)
 
-        self.attack_console = scrolledtext.ScrolledText(attack_pan, height=12, bg="#000", fg="#f39c12", font=("Consolas", 10))
+        # Use instance color constants so dark-mode can update these later
+        attack_bg = getattr(self, "attack_bg", "#000")
+        attack_fg = getattr(self, "attack_fg", "#f39c12")
+        self.attack_console = scrolledtext.ScrolledText(
+            attack_pan,
+            height=12,
+            bg=attack_bg,
+            fg=attack_fg,
+            font=(self.font_mono.actual("family"), 10)
+        )
         self.attack_console.pack(fill="both", expand=True)
 
-        blackout_pan = ttk.LabelFrame(bottom, text="Acit", padding=6, width=220)
-       
+        # Apply non-ttk widget theming (useful for dark mode toggles)
+        try:
+            self._apply_non_ttk_theme()
+        except Exception:
+            pass
 
-        self.blackout_listbox = tk.Listbox(blackout_pan, height=12, width=28)
-        self.blackout_listbox.pack(fill="both", expand=True)
 
     # ---------------------------
     # UI helpers & logging
