@@ -1,7 +1,7 @@
 # Smartgrid Project
 College Major Project on Cybersecurity to smartgrid
 
-Changelog
+# Changelog
 V1.0
 ------
 Completed and Hardcoded basic working of the file
