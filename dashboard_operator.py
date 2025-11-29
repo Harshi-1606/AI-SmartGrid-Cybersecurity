@@ -49,6 +49,12 @@ class OperatorDashboardApp:
         self.active_blackouts = {}
         self.blackout_default_duration = 20.0  # seconds (need to change to take input from user)
 
+        # NEW response queue controller settings
+        self.response_poll_interval_ms = getattr(self, "response_poll_interval_ms", 100)      # normal interval
+        self.response_max_items_per_tick = getattr(self, "response_max_items_per_tick", 8)    # max items to handle per tick
+        self.response_short_backlog_ms = getattr(self, "response_short_backlog_ms", 20)       # re-run quickly when backlog
+        self._response_after_id = None   # will hold after() id so we can cancel on shutdown
+
         # NEW: Logging system defaults
         self.attack_console_max_lines = 2000
         self.attack_log_file = None
@@ -681,24 +687,108 @@ class OperatorDashboardApp:
     # ---------------------------
     # Commands: send to firebase
     # ---------------------------
-    def send_command(self, cmd, targetID="", value=0.0):
-        payload = self._create_payload(cmd, targetID, value)
-        self.request_queue.put((1, payload))
+    def send_command(self, cmd: str, targetID: str = "", value: float = 0.0, priority: int = 1):
+        """
+        Safely create and enqueue a command payload for the network thread.
+        """
+
+        if not isinstance(cmd, str) or not cmd.strip():
+            self.append_attack_log("Invalid command name provided.", "ERROR")
+            return
+
+        if not isinstance(targetID, str):
+            self.append_attack_log("targetID must be a string.", "ERROR")
+            return
+
+        try:
+            payload = self._create_payload(cmd, targetID, value)
+        except Exception as e:
+            self.append_attack_log(f"Payload creation failed: {e}", "ERROR")
+            return
+
+        try:
+            self.request_queue.put((priority, payload))
+            self.append_attack_log(f"Queued command: {cmd} → {targetID}", "INFO")
+        except Exception as e:
+            self.append_attack_log(f"Failed to queue '{cmd}': {e}", "ERROR")
+
 
     # ---------------------------
     # Response processing
     # ---------------------------
     def process_response_queue(self):
+        """
+        Process a bounded number of items from response_queue on the GUI thread,
+        then schedule the next run adaptively (short delay if backlog remains).
+        """
         try:
-            while not self.response_queue.empty():
-                data = self.response_queue.get_nowait()
-                if data:
-                    # update UI
-                    self.update_dashboard(data)
-                    self.process_logs(data.get("log", ""))
+            processed = 0
+            max_items = getattr(self, "response_max_items_per_tick", 8)
+
+            while processed < max_items:
+                try:
+                    data = self.response_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+                try:
+                    if data:
+                        # Safe update_dashboard
+                        try:
+                            self.update_dashboard(data)
+                        except Exception as e:
+                            try:
+                                self.append_attack_log(f"update_dashboard failed: {e}", "ERROR")
+                            except Exception:
+                                pass
+
+                        # Safe process_logs
+                        try:
+                            self.process_logs(data.get("log", ""))
+                        except Exception as e:
+                            try:
+                                self.append_attack_log(f"process_logs failed: {e}", "ERROR")
+                            except Exception:
+                                pass
+
+                finally:
+                    try:
+                        self.response_queue.task_done()
+                    except Exception:
+                        pass
+
+                processed += 1
+
         finally:
-            if self.is_running:
-                self.root.after(100, self.process_response_queue)
+            # If app running, schedule next tick
+            if getattr(self, "is_running", False):
+                try:
+                    backlog = not self.response_queue.empty()
+                except Exception:
+                    backlog = False
+
+                # adaptive delay
+                if backlog:
+                    next_delay = getattr(self, "response_short_backlog_ms", 20)
+                else:
+                    next_delay = getattr(self, "response_poll_interval_ms", 100)
+
+                try:
+                    self._response_after_id = self.root.after(next_delay, self.process_response_queue)
+                except Exception:
+                    # fallback to default
+                    try:
+                        self._response_after_id = self.root.after(100, self.process_response_queue)
+                    except Exception:
+                        self._response_after_id = None
+            else:
+                # no scheduling when not running
+                try:
+                    if self._response_after_id is not None:
+                        self.root.after_cancel(self._response_after_id)
+                except Exception:
+                    pass
+                self._response_after_id = None
 
     def process_logs(self, log_msg):
         if not log_msg:
