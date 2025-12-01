@@ -58,6 +58,13 @@ class OperatorDashboardApp:
         self.response_short_backlog_ms = getattr(self, "response_short_backlog_ms", 20)       # re-run quickly when backlog
         self._response_after_id = None   # will hold after() id so we can cancel on shutdown
 
+        # how old (seconds) a status snapshot can be before considered stale/offline
+        self.status_stale_threshold = getattr(self, "status_stale_threshold", 8.0)  # seconds
+
+        # track last successful status timestamp (epoch seconds) for diagnostics
+        self._last_status_timestamp_epoch: Optional[float] = None
+
+
         # NEW: Logging system defaults
         self.attack_console_max_lines = 2000
         self.attack_log_file = None
@@ -203,6 +210,28 @@ class OperatorDashboardApp:
                         if resp.status_code == 200:
                             try:
                                 data = resp.json()
+                                try:
+                                    ts = None
+                                    if isinstance(data, dict):
+                                        # prefer explicit epoch
+                                        if "timestamp_epoch" in data:
+                                            try:
+                                                ts = float(data.get("timestamp_epoch"))
+                                            except Exception:
+                                                ts = None
+                                        elif "timestamp_iso" in data:
+                                            try:
+                                                # fromisoformat may raise; keep it guarded
+                                                ts = datetime.fromisoformat(data.get("timestamp_iso")).timestamp()
+                                            except Exception:
+                                                ts = None
+                                    if ts is not None:
+                                        try:
+                                            self._last_status_timestamp_epoch = ts
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
                                 # push to response queue without blocking indefinitely
                                 try:
                                     self.response_queue.put_nowait(data)
@@ -937,133 +966,190 @@ class OperatorDashboardApp:
 
         def do_update():
             try:
-                # --- basic numeric labels ---
-                total_generation = safe_float(data.get("totalGeneration", 0.0), 0.0)
-                self.lbl_gen.config(text=f"{total_generation:.2f} kW")
-
-                # --- build meter map from incoming data ---
-                meters = data.get("meters", []) or []
-                if not isinstance(meters, list):
-                    # tolerate dict-of-meters by converting to list
-                    try:
-                        meters = list(meters)
-                    except Exception:
-                        meters = []
-
-                # create a map id -> (location, consumption)
-                incoming = {}
-                for m in meters:
-                    try:
-                        meter_id = str(m.get("id", "")).strip()
-                        loc = str(m.get("location", "") or "")
-                        val = safe_float(m.get("consumption", 0.0), 0.0)
-                        if meter_id:
-                            incoming[meter_id] = (loc, val)
-                    except Exception:
-                        # ignore malformed meter entries
-                        continue
-
-                # --- incremental treeview update (avoid full clear) ---
-                # Build current tree mapping: meter_id -> item_id
-                existing = {}
-                for item in self.tree.get_children():
-                    vals = self.tree.item(item, "values") or ()
-                    if len(vals) >= 1:
-                        existing_id = str(vals[0])
-                        existing[existing_id] = item
-
-                # Update existing rows and mark seen
-                seen = set()
-                for meter_id, (loc, val) in incoming.items():
-                    if meter_id in existing:
-                        item_id = existing[meter_id]
-                        # update only if values changed
-                        cur_vals = self.tree.item(item_id, "values") or ()
-                        cur_val_num = safe_float(cur_vals[2] if len(cur_vals) >= 3 else 0.0, 0.0)
-                        if cur_val_num != val or (len(cur_vals) >= 2 and cur_vals[1] != loc):
-                            self.tree.item(item_id, values=(meter_id, loc, f"{val:.2f}"))
-                    else:
-                        # new meter — insert
-                        self.tree.insert("", "end", values=(meter_id, loc, f"{val:.2f}"))
-                    seen.add(meter_id)
-
-                # Remove stale rows that are not in incoming
-                for existing_id, item_id in list(existing.items()):
-                    if existing_id not in seen:
+                # ----- freshness check: parse timestamp in payload -----
+                now_utc = datetime.now(timezone.utc)
+                stale_threshold = float(getattr(self, "status_stale_threshold", 8.0))
+                # prefer epoch if present, else try iso parse
+                ts_epoch = None
+                if isinstance(data, dict):
+                    if "timestamp_epoch" in data:
                         try:
-                            self.tree.delete(item_id)
+                            ts_epoch = float(data.get("timestamp_epoch"))
+                        except Exception:
+                            ts_epoch = None
+                    elif "timestamp_iso" in data:
+                        try:
+                            ts_epoch = datetime.fromisoformat(data.get("timestamp_iso")).timestamp()
+                        except Exception:
+                            ts_epoch = None
+                is_stale = True
+                if ts_epoch is not None:
+                    try:
+                        snapshot_time = datetime.fromtimestamp(ts_epoch, tz=timezone.utc)
+                        age = (now_utc - snapshot_time).total_seconds()
+                        is_stale = age > stale_threshold
+                    except Exception:
+                        is_stale = True
+                else:
+                    # no timestamp in payload — treat as stale for safety
+                    is_stale = True
+                if is_stale:
+                    # Mark UI as offline/stale and avoid applying stale meter data
+                    try:
+                        self.lbl_status.config(text="OFFLINE", foreground="#c0392b")
+                        # dim indicators
+                        try:
+                            self._draw_light_indicator(self.cv_on, "#7f8c8d")
+                            self._draw_light_indicator(self.cv_off, "#7f8c8d")
                         except Exception:
                             pass
-
-                # --- total load & status ---
-                total_load = sum(v for _, v in incoming.values())
-                self.lbl_con.config(text=f"{total_load:.2f} kW")
-
-                status = str(data.get("gridStatus", "UNKNOWN") or "UNKNOWN")
-                self.lbl_status.config(text=status, foreground="green" if status.upper() == "STABLE" else "red")
-
-                # --- indicators: only redraw if state changed (simple caching) ---
-                indicator_state = getattr(self, "_last_indicator_state", None)
-                new_on_color = "#2ecc71" if total_load > 0.5 else "#bdc3c7"
-                new_off_color = "#bdc3c7" if total_load > 0.5 else "#e74c3c"
-                if indicator_state != (new_on_color, new_off_color):
-                    try:
-                        self._draw_light_indicator(self.cv_on, new_on_color)
-                        self._draw_light_indicator(self.cv_off, new_off_color)
+                        # mark defense labels as stale
+                        for key in ["authentication", "replay", "anomaly"]:
+                            lbl = self.def_labels.get(key)
+                            if lbl:
+                                lbl.config(text="STALE", foreground="#7f8c8d")
                     except Exception:
                         pass
-                    self._last_indicator_state = (new_on_color, new_off_color)
-
-                # --- Update defense labels ---
-                changed = False
-                for key in ["authentication", "replay", "anomaly"]:
-                    active = bool(data.get(f"{key}Active", False))
-                    lbl = self.def_labels.get(key)
-                    if lbl:
-                        new_text = "ACTIVE" if active else "DISABLED"
-                        new_fg = "#27ae60" if active else "#c0392b"
-                        # only config if changed (reduces flicker)
-                        try:
-                            cur_text = lbl.cget("text")
-                        except Exception:
-                            cur_text = None
-                        if cur_text != new_text:
-                            lbl.config(text=new_text, foreground=new_fg)
-                            changed = True
-
-                # --- simple de-dup: avoid applying identical snapshots repeatedly ---
-                snapshot = {
-                    "gen": round(total_generation, 3),
-                    "load": round(total_load, 3),
-                    "status": status,
-                    "meters_hash": hash(tuple(sorted(incoming.items())))
-                }
-                last = getattr(self, "_last_dashboard_snapshot", None)
-                if last == snapshot:
-                # nothing meaningful changed; skip (we already applied UI updates above, but this avoids future extra work)
+                    try:
+                        self.append_attack_log(f"Status snapshot stale (>{stale_threshold}s) — showing OFFLINE.", "WARNING")
+                    except Exception:
+                        pass
+                    # Do not apply stale meters/values; return early.
                     return
-                self._last_dashboard_snapshot = snapshot
-
-            except Exception as e:
-                # Never let UI thread crash — log the error
                 try:
-                    self.append_attack_log(f"update_dashboard error: {e}", "ERROR")
-                except Exception:
-                    # ultimate fallback: print
-                    print("update_dashboard error:", e)
+                    # --- basic numeric labels ---
+                    total_generation = safe_float(data.get("totalGeneration", 0.0), 0.0)
+                    self.lbl_gen.config(text=f"{total_generation:.2f} kW")
 
-        # schedule on the UI thread
-        try:
-            self.root.after(0, do_update)
-        except Exception:
-            # if scheduling fails for any reason, fallback to immediate call (best-effort)
+                    # --- build meter map from incoming data ---
+                    meters = data.get("meters", []) or []
+                    if not isinstance(meters, list):
+                        # tolerate dict-of-meters by converting to list
+                        try:
+                            meters = list(meters)
+                        except Exception:
+                            meters = []
+
+                    # create a map id -> (location, consumption)
+                    incoming = {}
+                    for m in meters:
+                        try:
+                            meter_id = str(m.get("id", "")).strip()
+                            loc = str(m.get("location", "") or "")
+                            val = safe_float(m.get("consumption", 0.0), 0.0)
+                            if meter_id:
+                                incoming[meter_id] = (loc, val)
+                        except Exception:
+                            # ignore malformed meter entries
+                            continue
+
+                    # --- incremental treeview update (avoid full clear) ---
+                    # Build current tree mapping: meter_id -> item_id
+                    existing = {}
+                    for item in self.tree.get_children():
+                        vals = self.tree.item(item, "values") or ()
+                        if len(vals) >= 1:
+                            existing_id = str(vals[0])
+                            existing[existing_id] = item
+
+                    # Update existing rows and mark seen
+                    seen = set()
+                    for meter_id, (loc, val) in incoming.items():
+                        if meter_id in existing:
+                            item_id = existing[meter_id]
+                            # update only if values changed
+                            cur_vals = self.tree.item(item_id, "values") or ()
+                            cur_val_num = safe_float(cur_vals[2] if len(cur_vals) >= 3 else 0.0, 0.0)
+                            if cur_val_num != val or (len(cur_vals) >= 2 and cur_vals[1] != loc):
+                                self.tree.item(item_id, values=(meter_id, loc, f"{val:.2f}"))
+                        else:
+                            # new meter — insert
+                            self.tree.insert("", "end", values=(meter_id, loc, f"{val:.2f}"))
+                        seen.add(meter_id)
+
+                    # Remove stale rows that are not in incoming
+                    for existing_id, item_id in list(existing.items()):
+                        if existing_id not in seen:
+                            try:
+                                self.tree.delete(item_id)
+                            except Exception:
+                                pass
+
+                    # --- total load & status ---
+                    total_load = sum(v for _, v in incoming.values())
+                    self.lbl_con.config(text=f"{total_load:.2f} kW")
+
+                    status = str(data.get("gridStatus", "UNKNOWN") or "UNKNOWN")
+                    self.lbl_status.config(text=status, foreground="green" if status.upper() == "STABLE" else "red")
+
+                    # --- indicators: only redraw if state changed (simple caching) ---
+                    indicator_state = getattr(self, "_last_indicator_state", None)
+                    new_on_color = "#2ecc71" if total_load > 0.5 else "#bdc3c7"
+                    new_off_color = "#bdc3c7" if total_load > 0.5 else "#e74c3c"
+                    if indicator_state != (new_on_color, new_off_color):
+                        try:
+                            self._draw_light_indicator(self.cv_on, new_on_color)
+                            self._draw_light_indicator(self.cv_off, new_off_color)
+                        except Exception:
+                            pass
+                        self._last_indicator_state = (new_on_color, new_off_color)
+
+                    # --- Update defense labels ---
+                    changed = False
+                    for key in ["authentication", "replay", "anomaly"]:
+                        active = bool(data.get(f"{key}Active", False))
+                        lbl = self.def_labels.get(key)
+                        if lbl:
+                            new_text = "ACTIVE" if active else "DISABLED"
+                            new_fg = "#27ae60" if active else "#c0392b"
+                            # only config if changed (reduces flicker)
+                            try:
+                                cur_text = lbl.cget("text")
+                            except Exception:
+                                cur_text = None
+                            if cur_text != new_text:
+                                lbl.config(text=new_text, foreground=new_fg)
+                                changed = True
+
+                    # --- simple de-dup: avoid applying identical snapshots repeatedly ---
+                    snapshot = {
+                        "gen": round(total_generation, 3),
+                        "load": round(total_load, 3),
+                        "status": status,
+                        "meters_hash": hash(tuple(sorted(incoming.items())))
+                    }
+                    last = getattr(self, "_last_dashboard_snapshot", None)
+                    if last == snapshot:
+                    # nothing meaningful changed; skip (we already applied UI updates above, but this avoids future extra work)
+                        return
+                    self._last_dashboard_snapshot = snapshot
+
+                except Exception as e:
+                    # Never let UI thread crash — log the error
+                    try:
+                        self.append_attack_log(f"update_dashboard error: {e}", "ERROR")
+                    except Exception:
+                        # ultimate fallback: print
+                        print("update_dashboard error:", e)
+            except Exception as outer_e:
+                # catch-all for the outer freshness/parse code — log and continue
+                try:
+                    self.append_attack_log(f"update_dashboard outer error: {outer_e}", "ERROR")
+                except Exception:
+                    pass
+
+            # schedule on the UI thread
             try:
-                do_update()
-            except Exception as e:
+                self.root.after(0, do_update)
+            except Exception:
+                # if scheduling fails for any reason, fallback to immediate call (best-effort)
                 try:
-                    self.append_attack_log(f"update_dashboard direct error: {e}", "ERROR")
-                except Exception:
-                    ("update_dashboard direct error:", e)
+                    do_update()
+                except Exception as e:
+                    try:
+                        self.append_attack_log(f"update_dashboard direct error: {e}", "ERROR")
+                    except Exception:
+                        print("update_dashboard direct error:", e)
 
 
     # ---------------------------
