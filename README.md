@@ -98,7 +98,10 @@ Has several bugs but works as intended
 - `active_blackouts_lock` is assigned more than once in `__init__` (duplicate assignment) — harmless but should be cleaned. 
 - Consider throttling `log_attack_action()` calls from the network worker to avoid spamming console on repeated transient errors (add consecutive-failure counter / backoff to logs). 
 - If you plan to persist `attack_log_file` ensure file rotation/truncation is implemented to avoid unbounded log growth. 
-
+---
+### V1.3.1 (dashboardoperator.py)
+### [Unreleased] - <02/12/2025>
+Minor Status update
 
 
 
