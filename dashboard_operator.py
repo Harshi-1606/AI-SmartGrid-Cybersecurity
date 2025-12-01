@@ -47,7 +47,16 @@ class OperatorDashboardApp:
 
         # Active blackouts: stores meterID -> expiry datetime
         self.active_blackouts = {}
+        self.active_blackouts_lock = threading.Lock()    # new: protect access
+        self.blackout_cleanup_interval_ms = 1000         # run interval (ms), configurable
+        self._cleanup_after_id = None                    # store after() id so we can cancel/reschedule
         self.blackout_default_duration = 20.0  # seconds (need to change to take input from user)
+
+        # NEW response queue controller settings
+        self.response_poll_interval_ms = getattr(self, "response_poll_interval_ms", 100)      # normal interval
+        self.response_max_items_per_tick = getattr(self, "response_max_items_per_tick", 8)    # max items to handle per tick
+        self.response_short_backlog_ms = getattr(self, "response_short_backlog_ms", 20)       # re-run quickly when backlog
+        self._response_after_id = None   # will hold after() id so we can cancel on shutdown
 
         # NEW: Logging system defaults
         self.attack_console_max_lines = 2000
@@ -68,6 +77,22 @@ class OperatorDashboardApp:
 
         # used to close tkinter window by clicking X(close) button
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+        # Ensure endpoints exist as instance attributes (network_worker expects these)
+        self.COMMAND_ENDPOINT = COMMAND_ENDPOINT
+        self.STATUS_ENDPOINT = STATUS_ENDPOINT
+
+        # compatibility alias used by _setup_styles
+        self._lighten = self._lighten_color
+
+        # thread-safety for active_blackouts
+        self.active_blackouts_lock = threading.Lock()
+
+        # maximum number of simultaneous blackout entries to keep in memory/UI
+        self.max_active_blackouts = getattr(self, "max_active_blackouts", 200)
+
+
+
 
     # ---------------------------
     # Payload and network
@@ -312,10 +337,12 @@ class OperatorDashboardApp:
         return constants
 
     # Helper: small color adjuster (very tiny dependency, placed here for convenience)
+    @staticmethod
     def _hex_to_rgb(hexc: str):
         hexc = hexc.lstrip("#")
         return tuple(int(hexc[i:i+2], 16) for i in (0, 2, 4))
 
+    @staticmethod
     def _rgb_to_hex(rgb):
         return "#{:02x}{:02x}{:02x}".format(*rgb)
 
@@ -447,7 +474,19 @@ class OperatorDashboardApp:
         bottom = ttk.Frame(meters_frame)
         bottom.pack(fill="both", expand=True)
 
-        attack_pan = ttk.LabelFrame(bottom, text="Attack Console", padding=6)
+        # Blackout list panel (left side)
+        blackout_frame = ttk.LabelFrame(bottom, text="Active Blackouts", padding=6)
+        blackout_frame.pack(side="left", fill="y", padx=(8,0))
+
+        self.blackout_listbox = tk.Listbox(
+            blackout_frame,
+            height=12,
+            width=32,
+            font=("Consolas", 10)
+        )
+        self.blackout_listbox.pack(fill="both", expand=False)
+
+        attack_pan = ttk.LabelFrame(bottom, text="Console", padding=6)
         attack_pan.pack(side="left", fill="both", expand=True)
 
         # Use instance color constants so dark-mode can update these later
@@ -464,7 +503,7 @@ class OperatorDashboardApp:
             borderwidth = 0
         )
         self.attack_console.pack(fill="both", expand=True)
-
+        
         # Apply non-ttk widget theming (useful for dark mode toggles)
         try:
             self._apply_non_ttk_theme()
@@ -681,132 +720,664 @@ class OperatorDashboardApp:
     # ---------------------------
     # Commands: send to firebase
     # ---------------------------
-    def send_command(self, cmd, targetID="", value=0.0):
-        payload = self._create_payload(cmd, targetID, value)
-        self.request_queue.put((1, payload))
+    def send_command(self, cmd: str, targetID: str = "", value: float = 0.0, priority: int = 1):
+        """
+        Safely create and enqueue a command payload for the network thread.
+        """
+
+        if not isinstance(cmd, str) or not cmd.strip():
+            self.append_attack_log("Invalid command name provided.", "ERROR")
+            return
+
+        if not isinstance(targetID, str):
+            self.append_attack_log("targetID must be a string.", "ERROR")
+            return
+
+        try:
+            payload = self._create_payload(cmd, targetID, value)
+        except Exception as e:
+            self.append_attack_log(f"Payload creation failed: {e}", "ERROR")
+            return
+
+        try:
+            self.request_queue.put((priority, payload))
+            self.append_attack_log(f"Queued command: {cmd} → {targetID}", "INFO")
+        except Exception as e:
+            self.append_attack_log(f"Failed to queue '{cmd}': {e}", "ERROR")
+
 
     # ---------------------------
     # Response processing
     # ---------------------------
     def process_response_queue(self):
+        """
+        Process a bounded number of items from response_queue on the GUI thread,
+        then schedule the next run adaptively (short delay if backlog remains).
+        """
         try:
-            while not self.response_queue.empty():
-                data = self.response_queue.get_nowait()
-                if data:
-                    # update UI
-                    self.update_dashboard(data)
-                    self.process_logs(data.get("log", ""))
+            processed = 0
+            max_items = getattr(self, "response_max_items_per_tick", 8)
+
+            while processed < max_items:
+                try:
+                    data = self.response_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+                try:
+                    if data:
+                        # Safe update_dashboard
+                        try:
+                            self.update_dashboard(data)
+                        except Exception as e:
+                            try:
+                                self.append_attack_log(f"update_dashboard failed: {e}", "ERROR")
+                            except Exception:
+                                pass
+
+                        # Safe process_logs
+                        try:
+                            self.process_logs(data.get("log", ""))
+                        except Exception as e:
+                            try:
+                                self.append_attack_log(f"process_logs failed: {e}", "ERROR")
+                            except Exception:
+                                pass
+
+                finally:
+                    try:
+                        self.response_queue.task_done()
+                    except Exception:
+                        pass
+
+                processed += 1
+
         finally:
-            if self.is_running:
-                self.root.after(100, self.process_response_queue)
+            # If app running, schedule next tick
+            if getattr(self, "is_running", False):
+                try:
+                    backlog = not self.response_queue.empty()
+                except Exception:
+                    backlog = False
+
+                # adaptive delay
+                if backlog:
+                    next_delay = getattr(self, "response_short_backlog_ms", 20)
+                else:
+                    next_delay = getattr(self, "response_poll_interval_ms", 100)
+
+                try:
+                    self._response_after_id = self.root.after(next_delay, self.process_response_queue)
+                except Exception:
+                    # fallback to default
+                    try:
+                        self._response_after_id = self.root.after(100, self.process_response_queue)
+                    except Exception:
+                        self._response_after_id = None
+            else:
+                # no scheduling when not running
+                try:
+                    if self._response_after_id is not None:
+                        self.root.after_cancel(self._response_after_id)
+                except Exception:
+                    pass
+                self._response_after_id = None
 
     def process_logs(self, log_msg):
+        """
+        Parse a single log message from the backend and route it to the attack console,
+        optionally adding targeted blackouts when detected.
+
+        Improvements:
+        - Accepts non-string values (converts to string or warns)
+        - Uses a single uppercase copy for matching (efficient)
+        - Avoids duplicate logging
+        - Uses timezone-aware expiry datetimes (UTC)
+        """
+
+        # Quick validation & normalization
+        if log_msg is None:
+            return
+
+        if not isinstance(log_msg, str):
+            try:
+                log_msg = str(log_msg)
+            except Exception:
+                # Could not turn it into a string — warn and skip
+                self.append_attack_log("Received non-string log (unreadable).", "WARNING")
+                return
+
+        log_msg = log_msg.strip()
         if not log_msg:
             return
 
-        # Defense logs — now shown in attack console
-        if "[DEFENSE]" in log_msg:
-            # still update labels via update_dashboard; also log here
-            self.log_attack_action(log_msg)
+        # Prepare uppercase copy for case-insensitive checks
+        lm = log_msg.upper()
 
-        # Attack keywords
-        attack_keywords = ("CRITICAL", "BLACKOUT", "DDoS", "DDOS", "INSTABILITY", "Tamper", "TAMPER")
-        if any(k.upper() in log_msg.upper() for k in attack_keywords):
-            self.log_attack_action(log_msg)
+        # Define keywords (uppercase for consistency)
+        attack_keywords = ("CRITICAL", "BLACKOUT", "DDOS", "INSTABILITY", "TAMPER", "DDOS")  # ensure uppercase
+        defense_marker = "[DEFENSE]"
 
-            # try to parse targeted blackout meter
-            lm = log_msg.upper()
-            if "TARGETED BLACKOUT" in lm or "METER:" in lm:
+        # Track whether we've already logged this message to avoid duplicates
+        logged = False
+
+        # 1) Defense marker (special tag)
+        if defense_marker in lm:
+            # Use defense-specific routing
+            self.log_attack_action(log_msg)   # log_attack_action uses DEFENSE tag
+            logged = True
+
+        # 2) Attack keyword detection (case-insensitive)
+        if any(k in lm for k in attack_keywords):
+            # If it was not already logged as DEFENSE, log it now.
+            if not logged:
+                # Use DEFENSE routing for attack messages as well (you can change level here)
+                self.log_attack_action(log_msg)
+                logged = True
+
+            # Try to extract targeted blackout meter information
+            # Look for "METER:" then take the following token as meter id (tolerant to punctuation)
+            if "METER:" in lm or "TARGETED BLACKOUT" in lm:
+                # find METER: if present, else try to find a token after the phrase "TARGETED BLACKOUT"
+                meter_id = None
                 start = lm.find("METER:")
                 if start != -1:
-                    rest = lm[start+6:].strip()
-                    meter_id = rest.split()[0].strip(").,;:")
-                    if meter_id:
-                        expiry = datetime.now() + timedelta(seconds=self.blackout_default_duration)
-                        self._add_active_blackout(meter_id, expiry)
+                    rest = log_msg[start + len("METER:"):].strip()
+                    # first token usually meter id; strip common trailing punctuation
+                    parts = rest.split()
+                    if parts:
+                        meter_id = parts[0].strip(").,;:\"'")
+                else:
+                    # fallback: try to find a token after "TARGETED BLACKOUT"
+                    idx = lm.find("TARGETED BLACKOUT")
+                    if idx != -1:
+                        rest = log_msg[idx + len("TARGETED BLACKOUT"):].strip()
+                        parts = rest.split()
+                        if parts:
+                            meter_id = parts[0].strip(").,;:\"'")
 
-        # Show other logs also in attack console
-        if "[DEFENSE]" not in log_msg and not any(k.upper() in log_msg.upper() for k in attack_keywords):
+                if meter_id:
+                    # Use timezone-aware expiry (UTC) to be consistent across the app
+                    expiry = datetime.now(timezone.utc) + timedelta(seconds=self.blackout_default_duration)
+                    self._add_active_blackout(meter_id, expiry)
+
+        # 3) If nothing matched earlier, log as info (avoid double-logging)
+        if not logged:
+            # For general logs, use the standard append (INFO/DEFENSE as you prefer)
             self.log_attack_action(log_msg)
 
     # ---------------------------
     # Dashboard updater
     # ---------------------------
     def update_dashboard(self, data):
-        # must run on UI thread
+        """
+        Safely update the UI from a backend status dict.
+
+        Improvements:
+        - Validates input
+        - Skips update if snapshot identical (simple de-dup)
+        - Incremental Treeview updates (update/insert/delete) to avoid full redraw
+        - Robust error handling and logging
+        """
+
+        # Validate type quickly (do not crash GUI thread if backend sends wrong payload)
+        if not isinstance(data, dict):
+            try:
+                # try to coerce common serializable types (e.g., JSON objects may be dict already)
+                data = dict(data)
+            except Exception:
+                self.append_attack_log(f"update_dashboard: unexpected data type {type(data)}", "WARNING")
+                return
+
+        def safe_float(v, default=0.0):
+            try:
+                return float(v)
+            except Exception:
+                return default
+
         def do_update():
-            self.lbl_gen.config(text=f"{data.get('totalGeneration', 0):.2f} kW")
-            total_load = 0
-            self.tree.delete(*self.tree.get_children())
-            for m in data.get("meters", []):
-                val = m.get("consumption", 0)
-                self.tree.insert("", "end", values=(m.get('id', ''), m.get('location', ''), f"{val:.2f}"))
-                total_load += val
+            try:
+                # --- basic numeric labels ---
+                total_generation = safe_float(data.get("totalGeneration", 0.0), 0.0)
+                self.lbl_gen.config(text=f"{total_generation:.2f} kW")
 
-            self.lbl_con.config(text=f"{total_load:.2f} kW")
-            status = data.get('gridStatus', "UNKNOWN")
-            self.lbl_status.config(text=status, foreground="green" if status == "STABLE" else "red")
+                # --- build meter map from incoming data ---
+                meters = data.get("meters", []) or []
+                if not isinstance(meters, list):
+                    # tolerate dict-of-meters by converting to list
+                    try:
+                        meters = list(meters)
+                    except Exception:
+                        meters = []
 
-            if total_load > 0.5:
-                self._draw_light_indicator(self.cv_on, "#2ecc71")
-                self._draw_light_indicator(self.cv_off, "#bdc3c7")
-            else:
-                self._draw_light_indicator(self.cv_on, "#bdc3c7")
-                self._draw_light_indicator(self.cv_off, "#e74c3c")
+                # create a map id -> (location, consumption)
+                incoming = {}
+                for m in meters:
+                    try:
+                        meter_id = str(m.get("id", "")).strip()
+                        loc = str(m.get("location", "") or "")
+                        val = safe_float(m.get("consumption", 0.0), 0.0)
+                        if meter_id:
+                            incoming[meter_id] = (loc, val)
+                    except Exception:
+                        # ignore malformed meter entries
+                        continue
 
-            # Update defense labels
-            for key in ["authentication", "replay", "anomaly"]:
-                active = bool(data.get(f"{key}Active", False))
-                lbl = self.def_labels.get(key)
-                if lbl:
-                    lbl.config(text="ACTIVE" if active else "DISABLED",
-                               foreground="#27ae60" if active else "#c0392b")
+                # --- incremental treeview update (avoid full clear) ---
+                # Build current tree mapping: meter_id -> item_id
+                existing = {}
+                for item in self.tree.get_children():
+                    vals = self.tree.item(item, "values") or ()
+                    if len(vals) >= 1:
+                        existing_id = str(vals[0])
+                        existing[existing_id] = item
 
-        self.root.after(0, do_update)
+                # Update existing rows and mark seen
+                seen = set()
+                for meter_id, (loc, val) in incoming.items():
+                    if meter_id in existing:
+                        item_id = existing[meter_id]
+                        # update only if values changed
+                        cur_vals = self.tree.item(item_id, "values") or ()
+                        cur_val_num = safe_float(cur_vals[2] if len(cur_vals) >= 3 else 0.0, 0.0)
+                        if cur_val_num != val or (len(cur_vals) >= 2 and cur_vals[1] != loc):
+                            self.tree.item(item_id, values=(meter_id, loc, f"{val:.2f}"))
+                    else:
+                        # new meter — insert
+                        self.tree.insert("", "end", values=(meter_id, loc, f"{val:.2f}"))
+                    seen.add(meter_id)
+
+                # Remove stale rows that are not in incoming
+                for existing_id, item_id in list(existing.items()):
+                    if existing_id not in seen:
+                        try:
+                            self.tree.delete(item_id)
+                        except Exception:
+                            pass
+
+                # --- total load & status ---
+                total_load = sum(v for _, v in incoming.values())
+                self.lbl_con.config(text=f"{total_load:.2f} kW")
+
+                status = str(data.get("gridStatus", "UNKNOWN") or "UNKNOWN")
+                self.lbl_status.config(text=status, foreground="green" if status.upper() == "STABLE" else "red")
+
+                # --- indicators: only redraw if state changed (simple caching) ---
+                indicator_state = getattr(self, "_last_indicator_state", None)
+                new_on_color = "#2ecc71" if total_load > 0.5 else "#bdc3c7"
+                new_off_color = "#bdc3c7" if total_load > 0.5 else "#e74c3c"
+                if indicator_state != (new_on_color, new_off_color):
+                    try:
+                        self._draw_light_indicator(self.cv_on, new_on_color)
+                        self._draw_light_indicator(self.cv_off, new_off_color)
+                    except Exception:
+                        pass
+                    self._last_indicator_state = (new_on_color, new_off_color)
+
+                # --- Update defense labels ---
+                changed = False
+                for key in ["authentication", "replay", "anomaly"]:
+                    active = bool(data.get(f"{key}Active", False))
+                    lbl = self.def_labels.get(key)
+                    if lbl:
+                        new_text = "ACTIVE" if active else "DISABLED"
+                        new_fg = "#27ae60" if active else "#c0392b"
+                        # only config if changed (reduces flicker)
+                        try:
+                            cur_text = lbl.cget("text")
+                        except Exception:
+                            cur_text = None
+                        if cur_text != new_text:
+                            lbl.config(text=new_text, foreground=new_fg)
+                            changed = True
+
+                # --- simple de-dup: avoid applying identical snapshots repeatedly ---
+                snapshot = {
+                    "gen": round(total_generation, 3),
+                    "load": round(total_load, 3),
+                    "status": status,
+                    "meters_hash": hash(tuple(sorted(incoming.items())))
+                }
+                last = getattr(self, "_last_dashboard_snapshot", None)
+                if last == snapshot:
+                # nothing meaningful changed; skip (we already applied UI updates above, but this avoids future extra work)
+                    return
+                self._last_dashboard_snapshot = snapshot
+
+            except Exception as e:
+                # Never let UI thread crash — log the error
+                try:
+                    self.append_attack_log(f"update_dashboard error: {e}", "ERROR")
+                except Exception:
+                    # ultimate fallback: print
+                    print("update_dashboard error:", e)
+
+        # schedule on the UI thread
+        try:
+            self.root.after(0, do_update)
+        except Exception:
+            # if scheduling fails for any reason, fallback to immediate call (best-effort)
+            try:
+                do_update()
+            except Exception as e:
+                try:
+                    self.append_attack_log(f"update_dashboard direct error: {e}", "ERROR")
+                except Exception:
+                    ("update_dashboard direct error:", e)
+
 
     # ---------------------------
     # Active blackouts management
     # ---------------------------
     def _add_active_blackout(self, meter_id, expiry_dt):
-        def do_add():
-            self.active_blackouts[meter_id] = expiry_dt
-            self._refresh_blackout_listbox()
-        self.root.after(0, do_add)
+        """
+        Thread-safe, defensive add of an active blackout entry.
+
+        - meter_id: str-like identifier for the meter (must be non-empty)
+        - expiry_dt: datetime-like expiry (naive datetimes will be converted to UTC-aware)
+        """
+        # Basic validation & normalization
+        if not meter_id:
+            return
+
+        # normalize meter id to string and strip whitespace
+        try:
+            meter_id = str(meter_id).strip()
+        except Exception:
+            return
+        if not meter_id:
+            return
+
+        # Ensure expiry_dt is a datetime and timezone-aware (UTC)
+        if not isinstance(expiry_dt, datetime):
+            try:
+                # attempt to coerce numeric epoch -> datetime
+                expiry_dt = datetime.fromtimestamp(float(expiry_dt), tz=timezone.utc)
+            except Exception:
+                # invalid expiry passed — fallback to default duration from now
+                expiry_dt = datetime.now(timezone.utc) + timedelta(seconds=getattr(self, "blackout_default_duration", 20.0))
+        else:
+            # make timezone-aware in UTC if naive
+            if expiry_dt.tzinfo is None:
+                expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+            else:
+                # convert to UTC for consistent comparisons
+                try:
+                    expiry_dt = expiry_dt.astimezone(timezone.utc)
+                except Exception:
+                    expiry_dt = expiry_dt
+
+        # Use lock to update shared structure safely
+        try:
+            with self.active_blackouts_lock:
+                existing = self.active_blackouts.get(meter_id)
+                # If existing expiry is later or equal, don't shorten it
+                if existing and isinstance(existing, datetime):
+                    # ensure existing is timezone aware for correct comparison
+                    existing_dt = existing
+                    if existing_dt.tzinfo is None:
+                        existing_dt = existing_dt.replace(tzinfo=timezone.utc)
+                    if existing_dt >= expiry_dt:
+                        # nothing to do
+                        return
+                # Add/update
+                self.active_blackouts[meter_id] = expiry_dt
+
+                # enforce max entries (drop earliest expiry if exceeded)
+                if getattr(self, "max_active_blackouts", None) is not None:
+                    try:
+                        maxn = int(self.max_active_blackouts)
+                        if len(self.active_blackouts) > maxn:
+                            # sort by expiry, drop the one with the earliest expiry (oldest)
+                            items = sorted(self.active_blackouts.items(), key=lambda kv: kv[1])
+                            while len(items) > maxn:
+                                drop_id, _ = items.pop(0)
+                                try:
+                                    del self.active_blackouts[drop_id]
+                                except KeyError:
+                                    pass
+                            # rebuild dict from remaining (preserve)
+                            self.active_blackouts = dict(items)
+                    except Exception:
+                        # on any error, skip eviction to avoid data loss
+                        pass
+
+        except Exception:
+            # best-effort: log and continue
+            try:
+                self.append_attack_log(f"Failed to add blackout for {meter_id}", "WARNING")
+            except Exception:
+                pass
+
+        # Schedule UI update on main thread. Keep the UI callback lightweight.
+        try:
+            def _ui_add():
+                # Refresh listbox if present; _refresh_blackout_listbox is already GUI-safe
+                try:
+                    if hasattr(self, "_refresh_blackout_listbox"):
+                        self._refresh_blackout_listbox()
+                except Exception:
+                    # avoid raising in GUI thread
+                    try:
+                        self.append_attack_log(f"Error refreshing blackout list for {meter_id}", "WARNING")
+                    except Exception:
+                        pass
+
+            # schedule
+            if getattr(self, "root", None) is not None:
+                try:
+                    self.root.after(0, _ui_add)
+                except Exception:
+                    # fallback: call directly (best-effort)
+                    try:
+                        _ui_add()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
 
     def _refresh_blackout_listbox(self):
-        self.blackout_listbox.delete(0, tk.END)
-        items = sorted(self.active_blackouts.items(), key=lambda kv: kv[1])
-        for meter_id, expiry in items:
-            secs = int(max(0, (expiry - datetime.now()).total_seconds()))
-            self.blackout_listbox.insert(tk.END, f"{meter_id}  (expires in {secs}s)")
+        # Ensure widget exists
+        if not hasattr(self, "blackout_listbox") or self.blackout_listbox is None:
+            return
+
+        # Build sorted list of (id, expiry)
+        try:
+            with self.active_blackouts_lock:
+                items = sorted(self.active_blackouts.items(), key=lambda kv: kv[1])
+        except Exception:
+            items = list(self.active_blackouts.items())
+
+        try:
+            # clear and repopulate
+            self.blackout_listbox.delete(0, tk.END)
+            now = datetime.now(timezone.utc)
+            for meter_id, expiry in items:
+                try:
+                    # ensure expiry is timezone-aware
+                    if expiry is None:
+                        secs = "?"
+                    else:
+                        if expiry.tzinfo is None:
+                            expiry = expiry.replace(tzinfo=timezone.utc)
+                        secs = int(max(0, (expiry - now).total_seconds()))
+                    self.blackout_listbox.insert(tk.END, f"{meter_id}  (expires in {secs}s)")
+                except Exception:
+                    # skip problematic entry
+                    continue
+        except Exception:
+            # swallow any UI errors to avoid crashing the GUI
+            pass
+
 
     def _cleanup_blackouts_loop(self):
+        """
+        Runs periodically (default every blackout_cleanup_interval_ms) on the GUI thread.
+        - Removes expired entries from self.active_blackouts (thread-safe).
+        - Logs ended blackouts in a single batch message.
+        - Refreshes the GUI listbox on the GUI thread (safe).
+        - Reschedules itself using a single after() id to avoid duplicates.
+        """
         try:
-            now = datetime.now()
+            # Use timezone-aware 'now' for safe comparisons
+            now = datetime.now(timezone.utc)
+
             removed = []
-            for meter_id, expiry in list(self.active_blackouts.items()):
-                if expiry <= now:
-                    removed.append(meter_id)
-                    del self.active_blackouts[meter_id]
+
+            # Ensure we have a lock to protect access (fallback to no-lock if missing)
+            lock = getattr(self, "active_blackouts_lock", None)
+
+            # Copy keys under lock, then process removals
+            if lock:
+                with lock:
+                    items = list(self.active_blackouts.items())
+                    for meter_id, expiry in items:
+                        try:
+                            if expiry is None:
+                                continue
+                            # normalize expiry to UTC-aware datetime
+                            if expiry.tzinfo is None:
+                                expiry_dt = expiry.replace(tzinfo=timezone.utc)
+                            else:
+                                expiry_dt = expiry.astimezone(timezone.utc)
+                            if expiry_dt <= now:
+                                removed.append(meter_id)
+                                try:
+                                    del self.active_blackouts[meter_id]
+                                except KeyError:
+                                    pass
+                        except Exception:
+                            # skip problematic entry but don't crash the loop
+                            continue
+            else:
+                # no lock available (older code); behave similarly but be defensive
+                items = list(self.active_blackouts.items())
+                for meter_id, expiry in items:
+                    try:
+                        if expiry is None:
+                            continue
+                        if expiry.tzinfo is None:
+                            expiry_dt = expiry.replace(tzinfo=timezone.utc)
+                        else:
+                            expiry_dt = expiry.astimezone(timezone.utc)
+                        if expiry_dt <= now:
+                            removed.append(meter_id)
+                            try:
+                                del self.active_blackouts[meter_id]
+                            except KeyError:
+                                pass
+                    except Exception:
+                        continue
+
+            # Batch log ended blackouts (single message to reduce spam)
             if removed:
-                for m in removed:
-                    self.log_attack_action(f"Targeted blackout ended (Meter: {m})")
-                self._refresh_blackout_listbox()
+                try:
+                    # Use a single useful message; you can change to ERROR/INFO as needed
+                    self.append_attack_log(f"Targeted blackout ended for: {', '.join(removed)}", "INFO")
+                except Exception:
+                    # best-effort: fall back to log_attack_action or print
+                    try:
+                        self.log_attack_action(f"Targeted blackout ended for: {', '.join(removed)}")
+                    except Exception:
+                        print("Targeted blackout ended for:", ", ".join(removed))
+
+                # Refresh the UI listbox on GUI thread — schedule on GUI thread if not already
+                try:
+                    if getattr(self, "root", None) is not None:
+                        # schedule a lightweight refresh (do not rebuild under lock)
+                        self.root.after(0, lambda: getattr(self, "_refresh_blackout_listbox", lambda: None)())
+                    else:
+                        # no root available — try direct call (best-effort)
+                        try:
+                            self._refresh_blackout_listbox()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
         finally:
-            if self.is_running:
-                self.root.after(1000, self._cleanup_blackouts_loop)
+            # Reschedule next run: keep a single after id to avoid duplicate timers
+            try:
+                if getattr(self, "is_running", False):
+                    # cancel previous if present (safe no-op if None)
+                    try:
+                        if getattr(self, "_cleanup_after_id", None) is not None:
+                            self.root.after_cancel(self._cleanup_after_id)
+                    except Exception:
+                        pass
+
+                    # schedule next
+                    try:
+                        interval = int(getattr(self, "blackout_cleanup_interval_ms", 1000))
+                    except Exception:
+                        interval = 1000
+                    try:
+                        self._cleanup_after_id = self.root.after(interval, self._cleanup_blackouts_loop)
+                    except Exception:
+                        # fallback: try scheduling with default 1000 ms, or set None
+                        try:
+                            self._cleanup_after_id = self.root.after(1000, self._cleanup_blackouts_loop)
+                        except Exception:
+                            self._cleanup_after_id = None
+                else:
+                    # If not running, try to cancel any pending callback and clear id
+                    try:
+                        if getattr(self, "_cleanup_after_id", None) is not None:
+                            self.root.after_cancel(self._cleanup_after_id)
+                    except Exception:
+                        pass
+                self._cleanup_after_id = None
+            except Exception:
+                # ensure we do not raise from the finally block
+                try:
+                    self._cleanup_after_id = None
+                except Exception:
+                    pass
+
 
     # ---------------------------
     # Finish / Close
     # ---------------------------
     def on_closing(self):
+        # Stop background threads
         self.is_running = False
+    
+        # Cancel scheduled callbacks if any exist
+        try:
+            if hasattr(self, "_response_after_id") and self._response_after_id is not None:
+                self.root.after_cancel(self._response_after_id)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "_cleanup_after_id") and self._cleanup_after_id is not None:
+                self.root.after_cancel(self._cleanup_after_id)
+        except Exception:
+            pass
+    
+        # Close the window
         self.root.destroy()
+
 
 # ---------------------------
 # Run
 # ---------------------------
-if __name__ == "__main__":
+def start_dashboard():
     root = tk.Tk()
-    app = OperatorDashboardApp(root)
-    root.mainloop()
+
+    try:
+        app = OperatorDashboardApp(root)
+        root.mainloop()
+    except Exception as e:
+        print("Fatal error:", e)
+    finally:
+        # ensure background threads stop
+        try:
+            app.is_running = False
+        except:
+            pass
+
+if __name__ == "__main__":
+    start_dashboard()
+
