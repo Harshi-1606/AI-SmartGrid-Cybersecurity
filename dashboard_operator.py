@@ -15,16 +15,16 @@ from requests import Session, RequestException
 from json import JSONDecodeError
 
 # --- Configuration ---
-FIREBASE_URL = "https://trip-a155a-default-rtdb.asia-southeast1.firebasedatabase.app/" # Firebase url
+FIREBASE_URL = "https://smartgrid-harshi-default-rtdb.asia-southeast1.firebasedatabase.app/" # Firebase url
 COMMAND_ENDPOINT = FIREBASE_URL + "command.json" # Adds command.json to the end of firebase url
-STATUS_ENDPOINT = FIREBASE_URL + "status.json" # Adds status.json to the end of firebase url
+STATUS_ENDPOINT = FIREBASE_URL + ".json" # Adds status.json to the end of firebase url
 
 # DEFENSES
 # Small dict mapping three defense names to a label and emoji icon.
 # This part of code is displayed in Defense toggle
 DEFENSE_INFO = {
     "authentication": {"title": "Authentication Gateway", "icon": "🔑"},
-    "replay": {"title": "Temporal Firewall", "icon": "⏳"},
+    "firewall": {"title": "Temporal Firewall", "icon": "⏳"},
     "anomaly": {"title": "Anomaly Detection", "icon": "📈"}
 }
 
@@ -33,8 +33,9 @@ class OperatorDashboardApp:
         # Saves root (Tk window), sets title/size/background.
         self.root = root
         self.root.title("OPERATOR DASHBOARD [SECURE TERMINAL]")
-        self.root.geometry("1200x820")
+        #self.root.geometry("1200x820")
         self.root.configure(bg="#2c3e50")
+        self.root.minsize(950,650)
 
         # Creates request_queue (priority queue) for outbound commands and 
         # response_queue for inbound data from network thread.
@@ -73,6 +74,9 @@ class OperatorDashboardApp:
         self._setup_styles()
         self.create_widgets()
 
+        # Start AI simulation loop
+        self.root.after(3000, self.simulate_ai_event)
+
         # Network thread
         # Starts a background network_thread (daemon) to handle HTTP I/O.
         self.network_thread = threading.Thread(target=self.network_worker, daemon=True)
@@ -93,7 +97,7 @@ class OperatorDashboardApp:
         self._lighten = self._lighten_color
 
         # thread-safety for active_blackouts
-        self.active_blackouts_lock = threading.Lock()
+        # self.active_blackouts_lock = threading.Lock() not used because duplicate (remove)
 
         # maximum number of simultaneous blackout entries to keep in memory/UI
         self.max_active_blackouts = getattr(self, "max_active_blackouts", 200)
@@ -289,9 +293,9 @@ class OperatorDashboardApp:
             self.style.theme_use(available[0])
 
         # ---- colors ----
-        self.bg_color = "#ecf0f1"       # main background
-        self.accent_color = "#2980b9"   # accent / value color
-        self.fg_color = "#333333"       # default foreground for labels
+        self.bg_color =      "#1e1e1e"               #"#ecf0f1" white       # main background
+        self.accent_color =  "#4ea1ff"               #"#2980b9" blue  # accent / value color
+        self.fg_color =      "#ffffff"               #"#333333"  grey  # default foreground for labels
 
         # ---- fonts (use system-appropriate fallbacks) ----
         if sys.platform.startswith("win"):
@@ -309,6 +313,8 @@ class OperatorDashboardApp:
         # ---- base widget styles (explicit classes) ----
         # Frame background
         self.style.configure("TFrame", background=self.bg_color)
+        self.style.configure("TLabelframe", background=self.bg_color)
+        self.style.configure("TLabelframe.Label", background=self.bg_color, foreground=self.fg_color)
 
         # Labels
         self.style.configure("TLabel",
@@ -319,28 +325,34 @@ class OperatorDashboardApp:
         # Buttons
         self.style.configure("TButton",
                             font=self.font_ui_bold,
-                            padding=(6, 4))  # give a bit of padding
+                            padding=(6, 4),  # give a bit of padding
+                            background = "#2c2c2c",
+                            foreground = "#ffffff"
+                            )  
+        
 
         # Button visual feedback (hover/active) - map uses theme element states
         try:
             self.style.map("TButton",
-                        foreground=[("active", self.fg_color), ("disabled", "#888")],
-                        background=[("active", "!disabled", self._lighten(self.bg_color, 0.03)),
-                                    ("pressed", "!disabled", self._lighten(self.bg_color, -0.03))])
+                        foreground=[("active", "#ffffff"), ("!disabled", "#ffffff"), ("disabled", "#888")])
+                        #background=[("active", "!disabled", self._lighten(self.bg_color, 0.03)),
+                                    #("pressed", "!disabled", self._lighten(self.bg_color, -0.03))])
         except Exception:
             # Some themes restrict background mapping, so ignore failures
             pass
 
         # Entry
         self.style.configure("TEntry",
-                            fieldbackground="#ffffff",
-                            background="#ffffff",
+                            fieldbackground= "#2c2c2c",  #"#ffffff" white
+                            background= "#2c2c2c",   #"#ffffff" white
+                            foreground = "#ffffff",
                             font=self.font_ui)
 
         # Treeview (if used)
         self.style.configure("Treeview",
-                            background="#ffffff",
-                            fieldbackground="#ffffff",
+                            background=   "#2c2c2c",       #"#ffffff"  white
+                            fieldbackground= "#2c2c2c",    #"#ffffff"  white
+                            foreground = "#ffffff",
                             font=self.font_ui)
         self.style.configure("Treeview.Heading", font=self.font_ui_bold)
 
@@ -433,8 +445,8 @@ class OperatorDashboardApp:
         self._draw_light_indicator(self.cv_on, "#bdc3c7")
 
         ttk.Button(lc,
-                text="ACTIVATE ALL LIGHTS",
-                width=22,
+                text="LIGHTS ON",
+                width=18,
                 command=lambda: self.send_command("SET_LIGHTS", value=1.0)).pack(side="left", padx=6, pady=4)
 
         # off indicator
@@ -443,9 +455,37 @@ class OperatorDashboardApp:
         self._draw_light_indicator(self.cv_off, "#bdc3c7")
 
         ttk.Button(lc,
-                text="DEACTIVATE ALL LIGHTS",
-                width=22,
+                text="LIGHTS OFF",
+                width=18,
                 command=lambda: self.send_command("SET_LIGHTS", value=0.0)).pack(side="left", padx=6, pady=4)
+
+        # ------------------------
+        # Grid Generation Control
+        # ------------------------
+        grid_frame = ttk.LabelFrame(master_frame, text="Grid Generation Control", padding= 8)
+        grid_frame.pack(fill="x", pady=(6,8))
+
+        self.cv_grid_on = tk.Canvas(grid_frame, width=28, height=28, bg= self.bg_color, highlightthickness=0)
+        self.cv_grid_on.pack(side="left", padx=(6,8))
+        self._draw_light_indicator(self.cv_grid_on, "#bdc3c7")
+
+        ttk.Button(
+            grid_frame,
+            text="GRID ON",
+            width=18,
+            command= lambda: self.send_command("GRID_ON")
+        ).pack(side="left", padx=6, pady=4)
+
+        self.cv_grid_off = tk.Canvas(grid_frame, width=28, height=28, bg=self.bg_color, highlightthickness=0)
+        self.cv_grid_off.pack(side="left", padx=(10,8))
+        self._draw_light_indicator(self.cv_grid_off, "#bdc3c7")
+
+        ttk.Button(
+            grid_frame,
+            text= "GRID OFF",
+            width=18,
+            command= lambda: self.send_command("GRID_OFF")
+        ).pack(side="left", padx=6, pady=4)
 
         # Defense buttons
         def_frame = ttk.LabelFrame(master_frame, text="Defense Toggles", padding=8)
@@ -454,7 +494,7 @@ class OperatorDashboardApp:
         self.def_buttons = {}
         self.def_labels = {}
 
-        for key in ["authentication", "replay", "anomaly"]:
+        for key in ["authentication", "firewall", "anomaly"]:
             sub = ttk.Frame(def_frame)
             sub.pack(fill="x", pady=4)
 
@@ -469,6 +509,52 @@ class OperatorDashboardApp:
             btn.pack(side="right")
             self.def_buttons[key] = btn
 
+        # -------------------------
+        # AI Monitoring Panel
+        # -------------------------
+        ai_frame = ttk.LabelFrame(master_frame, text="AI Monitoring", padding= 8)
+        ai_frame.pack(fill="x",pady=(10,0))
+        ai_frame.configure(height=120)
+
+        # AI status summary
+        self.ai_mode_label = ttk.Label(ai_frame, text="Mode: Monitoring")
+        self.ai_mode_label.pack(anchor="w", pady=(2,0))
+
+        self.ai_last_detection_label = ttk.Label(ai_frame, text="Last Detection: None")
+        self.ai_last_detection_label.pack(anchor="w", pady=(2,0))
+
+        self.ai_last_action_label = ttk.Label(ai_frame, text="Last Action: None")
+        self.ai_last_action_label.pack(anchor="w", pady=(2,0))
+
+        # AI Confidence Bar
+        self.ai_confidence_label = ttk.Label(ai_frame, text="Anomaly Risk: 0%")
+        self.ai_confidence_label.pack(anchor="w", pady=(6,0))
+
+        self.ai_confidence_bar = ttk.Progressbar(
+            ai_frame,
+            orient="horizontal",
+            length=200,
+            mode="determinate"
+        )
+        self.ai_confidence_bar.pack(fill="x", pady=(2,4))
+        self.ai_confidence_bar["value"] = 0
+
+        # AI Activity Feed
+        self.ai_feed_label = ttk.Label(ai_frame, text="AI Activity: ")
+        self.ai_feed_label.pack(anchor="w", pady=(6,0))
+
+        self.ai_feed = tk.Text(
+            ai_frame,
+            height=4,
+            width=50,
+            wrap="word",
+            bg="#000000",
+            fg="#00ffcc",
+            font=self.font_mono,
+            borderwidth=0
+        )
+        self.ai_feed.pack(fill="x", pady=(2,4))
+    
         # -------------------------
         # Right: Meters table + Attack console
         # -------------------------
@@ -491,11 +577,20 @@ class OperatorDashboardApp:
         self.lbl_status = ttk.Label(metrics, text="WAITING", font=("Segoe UI", 12, "bold"))
         self.lbl_status.pack(side="left", padx=(0,6))
 
+        # ----- Reset Button -----
+        self.btn_reset_trip = ttk.Button(
+            metrics,
+            text= "RESET TRIP",
+            width= 12,
+            command= lambda: self.send_command("RESET_TRIP")
+        )
+        self.btn_reset_trip.pack(side="left", padx=(10,0))
+
         # meters table
         cols = ("id", "loc", "val")
         self.tree = ttk.Treeview(meters_frame, columns=cols, show="headings", height=12)
         self.tree.heading("id", text="Meter ID"); self.tree.column("id", width=140)
-        self.tree.heading("loc", text="Zone"); self.tree.column("loc", width=120)
+        self.tree.heading("loc", text="Building"); self.tree.column("loc", width=120)
         self.tree.heading("val", text="Load (kW)"); self.tree.column("val", width=120)
         self.tree.pack(fill="both", expand=False, pady=(0,8))
 
@@ -504,7 +599,7 @@ class OperatorDashboardApp:
         bottom.pack(fill="both", expand=True)
 
         # Blackout list panel (left side)
-        blackout_frame = ttk.LabelFrame(bottom, text="Active Blackouts", padding=6)
+        blackout_frame = ttk.LabelFrame(bottom, text="Active Outages", padding=6)
         blackout_frame.pack(side="left", fill="y", padx=(8,0))
 
         self.blackout_listbox = tk.Listbox(
@@ -514,6 +609,40 @@ class OperatorDashboardApp:
             font=("Consolas", 10)
         )
         self.blackout_listbox.pack(fill="both", expand=False)
+
+        # ------------------
+        # Warning Lights
+        # ------------------
+
+        # ------ Capacity Warning ------
+
+        warning_frame = ttk.LabelFrame(blackout_frame, text="Warning", padding=6)
+        warning_frame.pack(fill="x", pady=(10,0))
+
+        # container for warning indicators
+        warning_row = ttk.Frame(warning_frame)
+        warning_row.pack(anchor="w")
+
+        # warning bulb
+        self.cv_capacity_warning = tk.Canvas(
+            warning_row,
+            width=28,
+            height=28,
+            bg=self.bg_color,
+            highlightthickness=0
+        )
+        self.cv_capacity_warning.pack(anchor="w")
+
+        # draw default OFF state
+        self._draw_light_indicator(self.cv_capacity_warning, "#000000")
+
+        # small label under bulb
+        ttk.Label(
+            warning_row,
+            text="Max \nGen",
+            font=("Segoe UI", 8),
+            justify= "center"
+        ).pack(anchor="w", pady=(0,4))
 
         attack_pan = ttk.LabelFrame(bottom, text="Console", padding=6)
         attack_pan.pack(side="left", fill="both", expand=True)
@@ -538,6 +667,85 @@ class OperatorDashboardApp:
             self._apply_non_ttk_theme()
         except Exception:
             pass
+    def simulate_ai_event(self):
+        from datetime import datetime
+
+        # ---- Real GRID DATA based risk
+
+        # Get current generation and load from UI labels
+        try:
+            generation = float(self.lbl_gen.cget("text").replace(" kW", ""))
+            load = float(self.lbl_con.cget("text").replace(" kW", ""))
+        except:
+            generation = 0.0
+            load = 0.0
+        
+        risk = 0
+
+        # Rule 1: Overload Conditon
+        if generation > 0:
+            load_ratio = load / generation
+            if load_ratio > 0.9:
+                risk += 50
+            elif load_ratio > 0.75:
+                risk += 30
+
+        # Rule 2: System Offline
+        if self.lbl_status.cget("text") == "OFFLINE":
+            risk += 40
+
+        # Rule 3: Active attack increases risk
+        if hasattr(self, "current_attack"):
+            if self.current_attack.upper() == "OVERLOAD":
+                risk +=40
+        
+        # Rule 4: Defense disabled increases vulnerability
+        if self.def_labels["authentication"].cget("text") == "DISABLED":
+            risk += 15
+
+        if self.def_labels["firewall"].cget("text") == "DISABLED":
+            risk += 15
+
+        if self.def_labels["anomaly"].cget("text") == "DISABLED":
+            risk += 10
+
+        # Clamp risk to 100
+        risk = min(risk, 100)
+        
+
+        # Update confidence bar
+        self.ai_confidence_bar["value"] = risk
+        self.ai_confidence_label.config(text=f"Anomaly Risk: {risk}%")
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+
+        # Detection priority: Attack first
+        if hasattr(self, "current_attack") and self.current_attack.upper() == "OVERLOAD":
+            detection = "Active Grid Attack"
+            action = "Isolating Affected Meter"
+
+        elif risk > 70:
+            detection = "High Load Anomaly"
+            action = "Isolating Affected Meter"
+            
+        elif risk >40:
+            detection = "Suspicious Pattern"
+            action = "Monitoring Closely"
+
+        else:
+            detection = "Normal"
+            action = "No Action Required"
+
+        # Update Labels
+        self.ai_last_detection_label.config(text=f"Last Detection: {detection}")
+        self.ai_last_action_label.config(text=f"Last Action: {action}")
+
+        # Log AI to feed
+        self.ai_feed.insert("end", f"[{timestamp}] Risk= {risk}% | {detection} | {action} \n")
+        self.ai_feed.see("end")
+
+        self.root.after(3000, self.simulate_ai_event)
+
 
 
     # ---------------------------
@@ -750,29 +958,62 @@ class OperatorDashboardApp:
     # Commands: send to firebase
     # ---------------------------
     def send_command(self, cmd: str, targetID: str = "", value: float = 0.0, priority: int = 1):
-        """
-        Safely create and enqueue a command payload for the network thread.
-        """
-
-        if not isinstance(cmd, str) or not cmd.strip():
-            self.append_attack_log("Invalid command name provided.", "ERROR")
-            return
-
-        if not isinstance(targetID, str):
-            self.append_attack_log("targetID must be a string.", "ERROR")
-            return
 
         try:
-            payload = self._create_payload(cmd, targetID, value)
-        except Exception as e:
-            self.append_attack_log(f"Payload creation failed: {e}", "ERROR")
-            return
+            if cmd == "SET_LIGHTS":
+                requests.put(
+                    FIREBASE_URL + "command.json",
+                    json={
+                        "command": "SET_LIGHTS",
+                        "value": value
+                    }
+                )
 
-        try:
-            self.request_queue.put((priority, payload))
-            self.append_attack_log(f"Queued command: {cmd} → {targetID}", "INFO")
+                state = "ON" if value == 1.0 else "OFF"
+                self.append_attack_log(f"Command Sent: LIGHTS {state}", "INFO")
+
+            elif cmd == "BLACKOUT":
+                requests.patch(
+                    FIREBASE_URL + "grid.json",
+                    json={"attack": "BLACKOUT"}
+                )
+
+            elif cmd == "CLEAR_ATTACK":
+                requests.patch(
+                    FIREBASE_URL + "grid.json",
+                    json={"attack": "NONE"}
+                )
+
+
+            elif cmd == "SET_DEFENSE":
+                requests.put(FIREBASE_URL + "command.json", json={"command": "SET_DEFENSE", "targetID": targetID})
+                defense_name = DEFENSE_INFO.get(targetID, {}).get("title", targetID)
+
+                self.append_attack_log(f"Command Sent: {defense_name}", "INFO")
+            
+            elif cmd == "GRID_ON":
+                requests.put(
+                    FIREBASE_URL + "command.json",
+                    json={"command": "GRID_ON"}
+                )
+                self.append_attack_log("Command Sent: GRID ON", "INFO")
+
+            elif cmd == "GRID_OFF":
+                requests.put(
+                    FIREBASE_URL + "command.json",
+                    json={"command": "GRID_OFF"}
+                )
+                self.append_attack_log("Command Sent: GRID OFF", "INFO")
+
+            elif cmd == "RESET_TRIP":
+                requests.put(
+                    FIREBASE_URL + "command.json",
+                    json={"command": "RESET_TRIP"}
+                )
+                self.append_attack_log("Command Sent: RESET TRIP", "INFO")
+
         except Exception as e:
-            self.append_attack_log(f"Failed to queue '{cmd}': {e}", "ERROR")
+            self.append_attack_log(f"Send failed: {e}", "ERROR")
 
 
     # ---------------------------
@@ -994,54 +1235,45 @@ class OperatorDashboardApp:
                     # no timestamp in payload — treat as stale for safety
                     is_stale = True
                 if is_stale:
-                    # Mark UI as offline/stale and avoid applying stale meter data
-                    try:
-                        self.lbl_status.config(text="OFFLINE", foreground="#c0392b")
-                        # dim indicators
-                        try:
-                            self._draw_light_indicator(self.cv_on, "#7f8c8d")
-                            self._draw_light_indicator(self.cv_off, "#7f8c8d")
-                        except Exception:
-                            pass
-                        # mark defense labels as stale
-                        for key in ["authentication", "replay", "anomaly"]:
-                            lbl = self.def_labels.get(key)
-                            if lbl:
-                                lbl.config(text="STALE", foreground="#7f8c8d")
-                    except Exception:
-                        pass
-                    try:
-                        self.append_attack_log(f"Status snapshot stale (>{stale_threshold}s) — showing OFFLINE.", "WARNING")
-                    except Exception:
-                        pass
-                    # Do not apply stale meters/values; return early.
-                    return
+                    # # Mark UI as offline/stale and avoid applying stale meter data
+                    # try:
+                    #     self.lbl_status.config(text="OFFLINE", foreground="#c0392b")
+                    #     # dim indicators
+                    #     try:
+                    #         self._draw_light_indicator(self.cv_on, "#7f8c8d")
+                    #         self._draw_light_indicator(self.cv_off, "#7f8c8d")
+                    #     except Exception:
+                    #         pass
+                    #     # mark defense labels as stale
+                    #     for key in ["authentication", "replay", "anomaly"]:
+                    #         lbl = self.def_labels.get(key)
+                    #         if lbl:
+                    #             lbl.config(text="STALE", foreground="#7f8c8d")
+                    # except Exception:
+                    #     pass
+                    # try:
+                    #     self.append_attack_log(f"Status snapshot stale (>{stale_threshold}s) — showing OFFLINE.", "WARNING")
+                    # except Exception:
+                    #     pass
+                    # # Do not apply stale meters/values; return early.
+                    # return
+                    pass
                 try:
                     # --- basic numeric labels ---
-                    total_generation = safe_float(data.get("totalGeneration", 0.0), 0.0)
+                    grid = data.get("grid", {})
+                    total_generation = safe_float(grid.get("totalGeneration", 0.0), 0.0)
                     self.lbl_gen.config(text=f"{total_generation:.2f} kW")
 
                     # --- build meter map from incoming data ---
-                    meters = data.get("meters", []) or []
-                    if not isinstance(meters, list):
-                        # tolerate dict-of-meters by converting to list
-                        try:
-                            meters = list(meters)
-                        except Exception:
-                            meters = []
-
-                    # create a map id -> (location, consumption)
+                    devices_dict = data.get("devices", {}) or {}
                     incoming = {}
-                    for m in meters:
-                        try:
-                            meter_id = str(m.get("id", "")).strip()
-                            loc = str(m.get("location", "") or "")
-                            val = safe_float(m.get("consumption", 0.0), 0.0)
-                            if meter_id:
-                                incoming[meter_id] = (loc, val)
-                        except Exception:
-                            # ignore malformed meter entries
-                            continue
+
+                    for key, devices_data in devices_dict.items():
+                        if key.startswith("meter_"):
+                            meter_id = key
+                            loc = key #using meter id as zone
+                            val = float(devices_data.get("power_consumption", 0.0))
+                            incoming[meter_id] = (loc, val)
 
                     # --- incremental treeview update (avoid full clear) ---
                     # Build current tree mapping: meter_id -> item_id
@@ -1076,16 +1308,53 @@ class OperatorDashboardApp:
                                 pass
 
                     # --- total load & status ---
-                    total_load = sum(v for _, v in incoming.values())
+                    total_load = float(grid.get("totalLoad", 0.0))
                     self.lbl_con.config(text=f"{total_load:.2f} kW")
 
-                    status = str(data.get("gridStatus", "UNKNOWN") or "UNKNOWN")
+                    status = str(grid.get("gridStatus", "UNKNOWN") or "UNKNOWN")
                     self.lbl_status.config(text=status, foreground="green" if status.upper() == "STABLE" else "red")
+
+                    # Store attack state for AI
+                    self.current_attack = str(grid.get("attack", "NONE"))
+
+                    # ---- GRID WIDE BLACKOUT TIMER ----
+                    remaining = float(grid.get("remainingBlackoutTime", 0.0))
+                    
+                    items = self.blackout_listbox.get(0, tk.END)
+
+                    # Check if first entry is already grid-wide
+                    has_grid_entry = items and "GRID-WIDE BLACKOUT" in items[0]
+
+                    if remaining > 0:
+                        text = f"GRID-WIDE BLACKOUT ({remaining:.1f}s remaining)"
+    
+                        if has_grid_entry:
+                            # Update existing first row
+                            self.blackout_listbox.delete(0)
+                            self.blackout_listbox.insert(0, text)
+                        else:
+                            # Insert new entry at top
+                            self.blackout_listbox.insert(0, text)
+
+                    else:
+                        # Remove grid-wide entry only if it exists
+                        if has_grid_entry:
+                            self.blackout_listbox.delete(0)
 
                     # --- indicators: only redraw if state changed (simple caching) ---
                     indicator_state = getattr(self, "_last_indicator_state", None)
-                    new_on_color = "#2ecc71" if total_load > 0.5 else "#bdc3c7"
-                    new_off_color = "#bdc3c7" if total_load > 0.5 else "#e74c3c"
+                    generation = float(grid.get("totalGeneration", 0))
+                    load = total_load
+                    max_capacity = float(grid.get("maxGeneration", 600))
+
+                    if load > 0:
+                        new_on_color = "#2ecc71"
+                        new_off_color = "#bdc3c7"
+                    else:
+                        new_on_color = "#bdc3c7"
+                        new_off_color = "#e74c3c"
+                    
+
                     if indicator_state != (new_on_color, new_off_color):
                         try:
                             self._draw_light_indicator(self.cv_on, new_on_color)
@@ -1094,22 +1363,51 @@ class OperatorDashboardApp:
                             pass
                         self._last_indicator_state = (new_on_color, new_off_color)
 
+                    if generation > 0:
+                        self._draw_light_indicator(self.cv_grid_on, "#2ecc71")
+                        self._draw_light_indicator(self.cv_grid_off, "#bdc3c7" )
+                    else:
+                        self._draw_light_indicator(self.cv_grid_on, "#bdc3c7")
+                        self._draw_light_indicator(self.cv_grid_off, "#e74c3c")
+
+                    # --- Capacity warning Indicator ---
+                    usage_ratio = generation / max_capacity if max_capacity > 0 else 0
+
+                    if usage_ratio >=0.90:
+                        # Critical(red)
+                        self._draw_light_indicator(self.cv_capacity_warning, "#e74c3c", blink= True)
+                    elif usage_ratio >= 0.80:
+                        self._draw_light_indicator(self.cv_capacity_warning, "#f39c12")
+                    else:
+                        self._draw_light_indicator(self.cv_capacity_warning, "#000000")
+
+
                     # --- Update defense labels ---
-                    changed = False
-                    for key in ["authentication", "replay", "anomaly"]:
-                        active = bool(data.get(f"{key}Active", False))
-                        lbl = self.def_labels.get(key)
+                    defenses = data.get("grid", {}).get("defenses", {})
+
+                    mapping = {
+                        "authentication" : "authGateway",
+                        "firewall" : "firewall",
+                        "anomaly" : "anomalyDetection"
+                    }
+                    
+                    for ui_key, firebase_key in mapping.items():
+                        active = bool(defenses.get(firebase_key, False))
+
+                        lbl = self.def_labels.get(ui_key)
+
                         if lbl:
-                            new_text = "ACTIVE" if active else "DISABLED"
-                            new_fg = "#27ae60" if active else "#c0392b"
-                            # only config if changed (reduces flicker)
-                            try:
-                                cur_text = lbl.cget("text")
-                            except Exception:
-                                cur_text = None
-                            if cur_text != new_text:
-                                lbl.config(text=new_text, foreground=new_fg)
-                                changed = True
+                            lbl.config(
+                                text = "ACTIVE" if active else "DISABLED",
+                                foreground = "#27ae60" if active else "#c0392b"
+                            )
+                            
+                            # button update
+                            btn = self.def_buttons.get(ui_key)
+                            if btn:
+                                btn.config(
+                                    text = "Disable" if active else "Enable"
+                                )
 
                     # --- simple de-dup: avoid applying identical snapshots repeatedly ---
                     snapshot = {
@@ -1139,17 +1437,7 @@ class OperatorDashboardApp:
                     pass
 
             # schedule on the UI thread
-            try:
-                self.root.after(0, do_update)
-            except Exception:
-                # if scheduling fails for any reason, fallback to immediate call (best-effort)
-                try:
-                    do_update()
-                except Exception as e:
-                    try:
-                        self.append_attack_log(f"update_dashboard direct error: {e}", "ERROR")
-                    except Exception:
-                        print("update_dashboard direct error:", e)
+        do_update()
 
 
     # ---------------------------

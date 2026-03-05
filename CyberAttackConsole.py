@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 
 # --- Configuration ---
-FIREBASE_URL = "https://trip-a155a-default-rtdb.asia-southeast1.firebasedatabase.app/"
+FIREBASE_URL = "https://smartgrid-harshi-default-rtdb.asia-southeast1.firebasedatabase.app/"
 COMMAND_ENDPOINT = FIREBASE_URL + "command.json"
 STATUS_ENDPOINT = FIREBASE_URL + "status.json"
 
@@ -38,6 +38,8 @@ class CyberAttackApp:
         self.root.after(500, self.poll_defense_status)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+        #self.remaining_blackout_time = 0 // should have been in defense
 
     # -------------------------------------------------------------------
     # PAYLOAD CREATION
@@ -244,6 +246,8 @@ class CyberAttackApp:
             resp = requests.get(STATUS_ENDPOINT, timeout=3)
             if resp.status_code == 200:
                 data = resp.json()
+                #remaining = data.get("grid", {}).get("remainingBlackoutTime", 0) //defense system
+                #self.remaining_blackout_time = remaining //defense system
 
                 auth = data.get("authenticationActive", False)
                 replay = data.get("replayActive", False)
