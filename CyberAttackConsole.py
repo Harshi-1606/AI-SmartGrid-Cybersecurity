@@ -9,14 +9,14 @@ from datetime import datetime
 # --- Configuration ---
 FIREBASE_URL = "https://smartgrid-harshi-default-rtdb.asia-southeast1.firebasedatabase.app/"
 COMMAND_ENDPOINT = FIREBASE_URL + "command.json"
-STATUS_ENDPOINT = FIREBASE_URL + "status.json"
+STATUS_ENDPOINT = FIREBASE_URL + ".json"
 
 class CyberAttackApp:
     def __init__(self, root):
         self.root = root
         self.root.title("CYBER ATTACK CONSOLE [UNAUTHORIZED]")
         self.root.geometry("1000x700")
-        self.root.configure(bg="#2c3e50")
+        self.root.configure(bg="#1e1e1e")
 
         self.request_queue = queue.PriorityQueue()
         self.is_running = True
@@ -127,16 +127,31 @@ class CyberAttackApp:
             self.log(f"CONNECTION ERROR: {e}", "err")
 
     def _display_spy_data(self, data):
+
+        grid = data.get("grid", {})
+        devices = data.get("devices", {})
+
+        generation = grid.get("totalGeneration", 0)
+        status = grid.get("gridStatus", "UNKNOWN")
+
         self.term.insert("end", "\n=== INTERCEPTED GRID REPORT ===\n", "info")
-        self.term.insert("end", f"Total Generation: {data.get('totalGeneration', 0)} kW\n", "info")
-        self.term.insert("end", f"Grid Status: {data.get('gridStatus', 'UNKNOWN')}\n", "info")
+        self.term.insert("end", f"Total Generation: {generation} kW\n", "info")
+        self.term.insert("end", f"Grid Status: {status}\n", "info")
 
         self.term.insert("end", "--- METER DETAILS ---\n", "info")
-        for m in data.get("meters", []):
-            mid = m.get("id", "???")
-            loc = m.get("location", "Unknown")
-            cons = m.get("consumption", 0)
-            self.term.insert("end", f"ID: {mid:<15} | Loc: {loc:<10} | Load: {cons} kW\n", "mitm")
+
+        for meter_id, meter_data in devices.items():
+
+            if not meter_id.startswith("meter_"):
+                continue
+
+            load = meter_data.get("power_consumption", 0)
+
+            self.term.insert(
+                "end",
+                f"ID: {meter_id:<15} | Load: {load} kW\n",
+                "mitm"
+            )
 
         self.term.insert("end", "===============================\n\n", "info")
         self.term.see("end")
@@ -147,6 +162,12 @@ class CyberAttackApp:
     def _setup_ui(self):
         style = ttk.Style()
         style.theme_use('clam')
+
+        style.configure(".", background="#1e1e1e", foreground="#ffffff")
+        style.configure("TLabel", background="#1e1e1e", foreground="#ffffff")
+        style.configure("TLabelframe", background="#1e1e1e", foreground="#ffffff")
+        style.configure("TLabelframe.Label", background="#1e1e1e", foreground="#ffffff")
+        style.configure("TButton", background="#2c2c2c", foreground="#ffffff")
 
         main = ttk.Frame(self.root)
         main.pack(fill="both", expand=True, padx=20, pady=20)
@@ -173,8 +194,8 @@ class CyberAttackApp:
                    command=lambda: self.send_attack("BLACKOUT")).pack(
             side="left", padx=10, expand=True, fill="x")
 
-        ttk.Button(f, text="DDoS FLOOD SIMULATION",
-                   command=lambda: self.send_attack("SIMULATE_DDOS")).pack(
+        ttk.Button(f, text="LOAD SPIKE ATTACK",
+                   command=lambda: self.send_attack("LOAD_SPIKE")).pack(
             side="left", padx=10, expand=True, fill="x")
 
         ttk.Button(f, text="INDUCE INSTABILITY",
@@ -191,6 +212,11 @@ class CyberAttackApp:
                    command=lambda: self.send_attack("BLACKOUT",
                                                     self.blackout_target.get())).pack(
             side="left", padx=10)
+        
+        ttk.Button(tb, text="RESET TARGETED BLACKOUT",
+           command=lambda: self.send_attack("RESET_TARGETED_BLACKOUT",
+                                            self.blackout_target.get())).pack(
+    side="left", padx=10)
 
         # ---------- TAMPERING ----------
         integ = ttk.LabelFrame(main, text="Integrity Attacks (Data Injection)")
@@ -220,12 +246,12 @@ class CyberAttackApp:
         term_frame.pack(fill="both", expand=True, pady=5)
 
         self.term = scrolledtext.ScrolledText(
-            term_frame, bg="#000", fg="#fff", font=("Consolas", 10), insertbackground="white"
+            term_frame, bg="#000000", fg="#00ff9c", font=("Consolas", 10), insertbackground="white"
         )
         self.term.pack(fill="both", expand=True)
 
         # Coloring
-        self.term.tag_config("sent", foreground="#f1c40f")
+        self.term.tag_config("sent", foreground="#f1c40f") 
         self.term.tag_config("mitm", foreground="#3498db")
         self.term.tag_config("err", foreground="#e74c3c")
         self.term.tag_config("info", foreground="#2ecc71")
@@ -244,16 +270,18 @@ class CyberAttackApp:
         """Check if ANY defense system is active."""
         try:
             resp = requests.get(STATUS_ENDPOINT, timeout=3)
+
             if resp.status_code == 200:
                 data = resp.json()
-                #remaining = data.get("grid", {}).get("remainingBlackoutTime", 0) //defense system
-                #self.remaining_blackout_time = remaining //defense system
 
-                auth = data.get("authenticationActive", False)
-                replay = data.get("replayActive", False)
-                anomaly = data.get("anomalyActive", False)
+                grid = data.get("grid", {})
+                defenses = grid.get("defenses", {})
 
-                self.defenses_active = auth or replay or anomaly
+                auth = defenses.get("authGateway", False)
+                firewall = defenses.get("firewall", False)
+                anomaly = defenses.get("anomalyDetection", False)
+
+                self.defenses_active = auth or firewall or anomaly
 
         except:
             pass
