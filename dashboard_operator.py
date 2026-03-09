@@ -53,6 +53,10 @@ class OperatorDashboardApp:
         self._cleanup_after_id = None                    # store after() id so we can cancel/reschedule
         self.blackout_default_duration = 20.0  # seconds (need to change to take input from user)
 
+        # AI memory (used for anomaly detection)
+        self.prev_load = 0
+        self.prev_generation = 0
+
         # NEW response queue controller settings
         self.response_poll_interval_ms = getattr(self, "response_poll_interval_ms", 100)      # normal interval
         self.response_max_items_per_tick = getattr(self, "response_max_items_per_tick", 8)    # max items to handle per tick
@@ -709,32 +713,47 @@ class OperatorDashboardApp:
         if self.def_labels["anomaly"].cget("text") == "DISABLED":
             risk += 10
 
+        # Rule 5: Load Spike detection
+        load_change = load - self.prev_load
+
+        if load_change > 80:
+            risk += 40
+
+        # Rule 6: Grid overload detection
+        if generation > 0:
+            load_ratio = load / generation
+
+            if load_ratio > 1.1:
+                risk += 50
+
         # Clamp risk to 100
         risk = min(risk, 100)
-        
 
         # Update confidence bar
         self.ai_confidence_bar["value"] = risk
         self.ai_confidence_label.config(text=f"Anomaly Risk: {risk}%")
 
         timestamp = datetime.now().strftime("%H:%M:%S")
+        detection = "Normal"
+        action = "Monitoring System"
 
         # Detection priority: Attack first
-        if hasattr(self, "current_attack") and self.current_attack.upper() == "OVERLOAD":
-            detection = "Active Grid Attack"
-            action = "Isolating Affected Meter"
-
-        elif risk > 70:
-            detection = "High Load Anomaly"
-            action = "Isolating Affected Meter"
+        if hasattr(self, "current_attack"):
+            if self.current_attack.upper() == "BLACKOUT":
+                detection = "Grid Blackout Attack"
+                action = "Operator Intervention Required"
             
-        elif risk >40:
-            detection = "Suspicious Pattern"
-            action = "Monitoring Closely"
+            elif self.current_attack.upper() == "LOAD_SPIKE":
+                detection = "Load Spike Attack"
+                action = "Investigating Load Surge"
+            
+            elif self.current_attack.upper() == "INSTABILITY":
+                detection = "Grid Instability Detected"
+                action = "Stabilizing System"
 
-        else:
-            detection = "Normal"
-            action = "No Action Required"
+        # Critical risk recommendation
+        if risk > 85:
+            action = "CRITICAL THREAT - Enable Defenses Immediately"
 
         # Update Labels
         self.ai_last_detection_label.config(text=f"Last Detection: {detection}")
@@ -743,6 +762,9 @@ class OperatorDashboardApp:
         # Log AI to feed
         self.ai_feed.insert("end", f"[{timestamp}] Risk= {risk}% | {detection} | {action} \n")
         self.ai_feed.see("end")
+
+        self.prev_load = load
+        self.prev_generation = generation
 
         self.root.after(3000, self.simulate_ai_event)
 
