@@ -207,7 +207,8 @@ class CyberAttackApp:
         tb.pack(fill="x", pady=5)
 
         ttk.Label(tb, text="Meter ID:").pack(side="left", padx=5)
-        ttk.Entry(tb, textvariable=self.blackout_target, width=20).pack(side="left", padx=5)
+        tk.Entry(tb, textvariable=self.blackout_target, width=20,
+         bg="#2c2c2c", fg="white", insertbackground="white").pack(side="left", padx=5)
         ttk.Button(tb, text="TRIGGER TARGETED BLACKOUT",
                    command=lambda: self.send_attack("BLACKOUT",
                                                     self.blackout_target.get())).pack(
@@ -226,10 +227,12 @@ class CyberAttackApp:
         ff.pack(fill="x", pady=10)
 
         ttk.Label(ff, text="Target Meter ID:").pack(side="left", padx=5)
-        ttk.Entry(ff, textvariable=self.tamper_target, width=20).pack(side="left", padx=5)
+        tk.Entry(ff, textvariable=self.tamper_target, width=20,
+         bg="#2c2c2c", fg="white", insertbackground="white").pack(side="left", padx=5)
 
         ttk.Label(ff, text="Injection Value:").pack(side="left", padx=5)
-        ttk.Entry(ff, textvariable=self.tamper_value, width=10).pack(side="left", padx=5)
+        tk.Entry(ff, textvariable=self.tamper_value, width=10,
+         bg="#2c2c2c", fg="white", insertbackground="white").pack(side="left", padx=5)
 
         ttk.Button(ff, text="INJECT PAYLOAD",
                    command=lambda: self.send_attack("TAMPER_METER",
