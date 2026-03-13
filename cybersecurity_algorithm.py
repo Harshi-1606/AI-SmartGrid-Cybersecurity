@@ -19,12 +19,28 @@ def detect_grid_anomaly(load, generation, prev_load, grid_status, defenses):
         recommendation = "Investigate abnormal load spike"
 
     # ---------------------------------
-    # Rule 2: Grid Overload
+    # Rule 2: Grid Utilization Monitoring
     # ---------------------------------
-    if generation > 0 and load_ratio > 1.1:
-        risk += 40
-        detection = "Grid Overload Detected"
-        recommendation = "Reduce load immediately"
+    if generation > 0:
+        load_ratio = load / generation
+
+        # Critical overload
+        if load_ratio > 1.0:
+            risk += 50
+            detection = "Grid Overload Detected"
+            recommendation = "Reduce load immediately"
+
+        # Near capacity
+        elif load_ratio > 0.85:
+            risk += 35
+            detection = "High Grid Utilization"
+            recommendation = "Monitor system capacity"
+
+        # Elevated load
+        elif load_ratio > 0.70:
+            risk += 20
+            detection = "Elevated Load Condition"
+            recommendation = "Observe grid stability"
 
     # ---------------------------------
     # Rule 3: Instability Attack
