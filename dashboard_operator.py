@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict,Any, Optional
 from requests import Session, RequestException
 from json import JSONDecodeError
+from cybersecurity_algorithm import detect_grid_anomaly
 
 # --- Configuration ---
 FIREBASE_URL = "https://smartgrid-harshi-default-rtdb.asia-southeast1.firebasedatabase.app/" # Firebase url
@@ -524,6 +525,9 @@ class OperatorDashboardApp:
         self.ai_mode_label = ttk.Label(ai_frame, text="Mode: Monitoring")
         self.ai_mode_label.pack(anchor="w", pady=(2,0))
 
+        self.ai_threat_label = ttk.Label(ai_frame, text="Threat Level: SAFE")
+        self.ai_threat_label.pack(anchor="w", pady=(2,0))
+
         self.ai_last_detection_label = ttk.Label(ai_frame, text="Last Detection: None")
         self.ai_last_detection_label.pack(anchor="w", pady=(2,0))
 
@@ -672,7 +676,6 @@ class OperatorDashboardApp:
         except Exception:
             pass
     def simulate_ai_event(self):
-        from datetime import datetime
 
         # ---- Real GRID DATA based risk
 
@@ -684,58 +687,99 @@ class OperatorDashboardApp:
             generation = 0.0
             load = 0.0
         
-        risk = 0
+        # Get defense states
+        defenses = {
+        "authGateway": self.def_labels["authentication"].cget("text") == "ACTIVE",
+        "firewall": self.def_labels["firewall"].cget("text") == "ACTIVE",
+        "anomalyDetection": self.def_labels["anomaly"].cget("text") == "ACTIVE"
+        }
 
-        # Rule 1: Overload Conditon
-        if generation > 0:
-            load_ratio = load / generation
-            if load_ratio > 0.9:
-                risk += 50
-            elif load_ratio > 0.75:
-                risk += 30
-
-        # Rule 2: System Offline
-        if self.lbl_status.cget("text") == "OFFLINE":
-            risk += 40
-
-        # Rule 3: Active attack increases risk
-        if hasattr(self, "current_attack"):
-            if self.current_attack.upper() == "OVERLOAD":
-                risk +=40
+        # Call cybersecurity detection algorithm
+        risk, detection, action = detect_grid_anomaly(
+            load,
+            generation,
+            self.prev_load,
+            self.lbl_status.cget("text"),
+            defenses
+        )
         
-        # Rule 4: Defense disabled increases vulnerability
-        if self.def_labels["authentication"].cget("text") == "DISABLED":
-            risk += 15
+        # risk = 0
 
-        if self.def_labels["firewall"].cget("text") == "DISABLED":
-            risk += 15
+        # # Rule 1: Overload Conditon
+        # if generation > 0:
+        #     load_ratio = load / generation
+        #     if load_ratio > 0.9:
+        #         risk += 50
+        #     elif load_ratio > 0.75:
+        #         risk += 30
 
-        if self.def_labels["anomaly"].cget("text") == "DISABLED":
-            risk += 10
+        # # Rule 2: System Offline
+        # if self.lbl_status.cget("text") == "OFFLINE":
+        #     risk += 40
 
-        # Rule 5: Load Spike detection
-        load_change = load - self.prev_load
+        # # Rule 3: Active attack increases risk
+        # if hasattr(self, "current_attack"):
+        #     if self.current_attack.upper() == "OVERLOAD":
+        #         risk +=40
+        
+        # # Rule 4: Defense disabled increases vulnerability
+        # if self.def_labels["authentication"].cget("text") == "DISABLED":
+        #     risk += 15
 
-        if load_change > 80:
-            risk += 40
+        # if self.def_labels["firewall"].cget("text") == "DISABLED":
+        #     risk += 15
 
-        # Rule 6: Grid overload detection
-        if generation > 0:
-            load_ratio = load / generation
+        # if self.def_labels["anomaly"].cget("text") == "DISABLED":
+        #     risk += 10
 
-            if load_ratio > 1.1:
-                risk += 50
+        # # Rule 5: Load Spike detection
+        # load_change = load - self.prev_load
+
+        # if load_change > 80:
+        #     risk += 40
+
+        # # Rule 6: Grid overload detection
+        # if generation > 0:
+        #     load_ratio = load / generation
+
+        #     if load_ratio > 1.1:
+        #         risk += 50
 
         # Clamp risk to 100
         risk = min(risk, 100)
+
+        # Determine threat level
+        if risk <= 25:
+            threat = "SAFE"
+            color = "#2ecc71"
+
+        elif risk <= 50:
+            threat = "SUSPICIOUS"
+            color = "#f1c40f"
+
+        elif risk <= 75:
+            threat = "HIGH RISK"
+            color = "#e67e22"
+
+        else:
+            threat = "CRITICAL"
+            color = "#e74c3c"
 
         # Update confidence bar
         self.ai_confidence_bar["value"] = risk
         self.ai_confidence_label.config(text=f"Anomaly Risk: {risk}%")
 
+        self.ai_threat_label.config(
+            text=f"Threat Level: {threat}",
+            foreground=color
+        )
+
         timestamp = datetime.now().strftime("%H:%M:%S")
-        detection = "Normal"
-        action = "Monitoring System"
+        # detection = "Normal"
+        # action = "Monitoring System"
+
+        self.ai_last_detection_label.config(text=f"Last Detection: {detection}")
+        self.ai_last_action_label.config(text=f"Last Action: {action}")
 
         # Detection priority: Attack first
         if hasattr(self, "current_attack"):
@@ -755,12 +799,32 @@ class OperatorDashboardApp:
         if risk > 85:
             action = "CRITICAL THREAT - Enable Defenses Immediately"
 
+        # --------------------------------
+        # AI Decision Engine
+        # --------------------------------
+        ai_decision = "No action required"
+
+        if detection == "Load Injection Attack":
+            ai_decision = "Enable Temporal Firewall"
+
+        elif detection == "Grid Overload Detected":
+            ai_decision = "Reduce Load Immediately"
+
+        elif detection == "Grid Instability Attack":
+            ai_decision = "Stabilize Power Generation"
+
+        elif detection == "Grid Offline Attack":
+            ai_decision = "Check Grid Connectivity"
+
+        elif risk > 80:
+            ai_decision = "Activate All Defenses"
+
         # Update Labels
         self.ai_last_detection_label.config(text=f"Last Detection: {detection}")
         self.ai_last_action_label.config(text=f"Last Action: {action}")
 
         # Log AI to feed
-        self.ai_feed.insert("end", f"[{timestamp}] Risk= {risk}% | {detection} | {action} \n")
+        self.ai_feed.insert("end", f"[{timestamp}] Risk={risk}% | {detection} | {action} | AI Decision: {ai_decision}\n")
         self.ai_feed.see("end")
 
         self.prev_load = load
