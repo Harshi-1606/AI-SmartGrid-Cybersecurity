@@ -695,11 +695,16 @@ class OperatorDashboardApp:
         }
 
         # Call cybersecurity detection algorithm
+        grid_state = self.lbl_status.cget("text")
+
+        if hasattr(self, "current_attack") and self.current_attack == "INSTABILITY":
+            grid_state = "INSTABILITY"
+
         risk, detection, action = detect_grid_anomaly(
             load,
             generation,
             self.prev_load,
-            self.lbl_status.cget("text"),
+            grid_state,
             defenses
         )
         
@@ -787,11 +792,11 @@ class OperatorDashboardApp:
                 detection = "Grid Blackout Attack"
                 action = "Operator Intervention Required"
             
-            elif self.current_attack.upper() == "LOAD_SPIKE":
+            elif self.current_attack.upper() == "LOAD_SPIKE" and detection == "Normal Operation":
                 detection = "Load Spike Attack"
                 action = "Investigating Load Surge"
             
-            elif self.current_attack.upper() == "INSTABILITY":
+            elif self.current_attack.upper() == "INSTABILITY" and detection == "Normal Operation":
                 detection = "Grid Instability Detected"
                 action = "Stabilizing System"
 
@@ -804,7 +809,7 @@ class OperatorDashboardApp:
         # --------------------------------
         ai_decision = "No action required"
 
-        if detection == "Load Injection Attack":
+        if detection in ["Load Injection Attack", "Load Spike Attack"]:
             ai_decision = "Enable Temporal Firewall"
 
         elif detection == "Grid Overload Detected":

@@ -43,20 +43,20 @@ def detect_grid_anomaly(load, generation, prev_load, grid_status, defenses):
             recommendation = "Observe grid stability"
 
     # ---------------------------------
-    # Rule 3: Instability Attack
+    # Rule 3: Coordinated Attack Detection
     # ---------------------------------
-    if grid_status == "INSTABILITY":
+    if load_change > 50 and grid_status == "INSTABILITY":
+        risk += 45
+        detection = "Coordinated Grid Attack"
+        recommendation = "Activate all defenses immediately"
+
+    # ---------------------------------
+    # Rule 4: Grid Instability Attack
+    # ---------------------------------
+    elif grid_status == "INSTABILITY":
         risk += 40
         detection = "Grid Instability Attack"
         recommendation = "Stabilize power generation"
-
-    # ---------------------------------
-    # Rule 4: Grid Offline Attack
-    # ---------------------------------
-    if grid_status == "OFFLINE":
-        risk += 50
-        detection = "Grid Offline Attack"
-        recommendation = "Check grid connectivity"
 
     # ---------------------------------
     # Rule 5: Defense Weakness
@@ -71,25 +71,17 @@ def detect_grid_anomaly(load, generation, prev_load, grid_status, defenses):
         risk += 5
 
     # ---------------------------------
-    # Rule 6: Coordinated Attack Detection
+    # Rule 6: Stealthy Load Manipulation
     # ---------------------------------
-    if load_change > 50 and grid_status == "INSTABILITY":
-        risk += 25
-        detection = "Coordinated Grid Attack"
-        recommendation = "Activate all defenses immediately"
-
-    # ---------------------------------
-    # Rule 7: Stealthy Load Manipulation
-    # ---------------------------------
-    if 20 < load_change < 50:
+    if 20 < load_change < 50 and detection == "Normal Operation":
         risk += 15
         detection = "Suspicious Load Manipulation"
         recommendation = "Monitor meter integrity"
 
     # ---------------------------------
-    # Rule 8: Defense Bypass Attempt
+    # Rule 7: Defense Bypass Attempt
     # ---------------------------------
-    if risk > 40 and (
+    if risk > 60 and (
         not defenses.get("authGateway", False) or
         not defenses.get("firewall", False)
     ):
