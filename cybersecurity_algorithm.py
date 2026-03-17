@@ -1,97 +1,84 @@
 def detect_grid_anomaly(load, generation, prev_load, grid_status, defenses):
 
-    risk = 0
-    detection = "Normal Operation"
-    recommendation = "Monitoring System"
-
     # ---------------------------------
-    # Feature Extraction
+    # Step 1: Feature Extraction
     # ---------------------------------
     load_change = load - prev_load
     load_ratio = load / generation if generation > 0 else 0
+    instability = (grid_status == "INSTABILITY")
 
     # ---------------------------------
-    # Rule 1: Load Injection Attack
+    # Step 2: Primary Threat Detection
     # ---------------------------------
-    if load_change > 80:
-        risk += 35
+    risk = 10
+    detection = "Normal Operation"
+    recommendation = "System operating normally"
+
+    if load_change > 50 and instability:
+        risk = 85
+        detection = "Coordinated Grid Attack"
+        recommendation = "Activate emergency defenses immediately"
+
+    elif load_ratio > 1.0:
+        risk = 75
+        detection = "Grid Overload"
+        recommendation = "Reduce load or increase generation"
+
+    elif load_change > 80:
+        risk = 65
         detection = "Load Injection Attack"
         recommendation = "Investigate abnormal load spike"
 
-    # ---------------------------------
-    # Rule 2: Grid Utilization Monitoring
-    # ---------------------------------
-    if generation > 0:
-        load_ratio = load / generation
+    elif instability:
+        risk = 55
+        detection = "Grid Instability"
+        recommendation = "Stabilize generation and monitor grid"
 
-        # Critical overload
-        if load_ratio > 1.0:
-            risk += 50
-            detection = "Grid Overload Detected"
-            recommendation = "Reduce load immediately"
-
-        # Near capacity
-        elif load_ratio > 0.85:
-            risk += 35
-            detection = "High Grid Utilization"
-            recommendation = "Monitor system capacity"
-
-        # Elevated load
-        elif load_ratio > 0.70:
-            risk += 20
-            detection = "Elevated Load Condition"
-            recommendation = "Observe grid stability"
+    elif 20 < load_change <= 50:
+        risk = 40
+        detection = "Suspicious Load Manipulation"
+        recommendation = "Monitor smart meter integrity"
 
     # ---------------------------------
-    # Rule 3: Coordinated Attack Detection
+    # Step 3: Contextual Risk Modifiers
     # ---------------------------------
-    if load_change > 50 and grid_status == "INSTABILITY":
-        risk += 45
-        detection = "Coordinated Grid Attack"
-        recommendation = "Activate all defenses immediately"
 
-    # ---------------------------------
-    # Rule 4: Grid Instability Attack
-    # ---------------------------------
-    elif grid_status == "INSTABILITY":
-        risk += 40
-        detection = "Grid Instability Attack"
-        recommendation = "Stabilize power generation"
-
-    # ---------------------------------
-    # Rule 5: Defense Weakness
-    # ---------------------------------
+    # Defense weakness (small penalties)
     if not defenses.get("authGateway", False):
-        risk += 10
-
-    if not defenses.get("firewall", False):
-        risk += 10
-
-    if not defenses.get("anomalyDetection", False):
         risk += 5
 
-    # ---------------------------------
-    # Rule 6: Stealthy Load Manipulation
-    # ---------------------------------
-    if 20 < load_change < 50 and detection == "Normal Operation":
-        risk += 15
-        detection = "Suspicious Load Manipulation"
-        recommendation = "Monitor meter integrity"
+    if not defenses.get("firewall", False):
+        risk += 5
+
+    if not defenses.get("anomalyDetection", False):
+        risk += 3
+
+    # Rapid load spike (secondary signal)
+    if load_change > 70:
+        risk += 5
+
+    # Near capacity warning
+    if 0.85 < load_ratio <= 1.0:
+        risk += 5
+
+    # Stable condition bonus (reduce noise)
+    if load_change < 10 and not instability:
+        risk -= 5
 
     # ---------------------------------
-    # Rule 7: Defense Bypass Attempt
+    # Step 4: Defense Bypass Detection (Refined)
     # ---------------------------------
-    if risk > 60 and (
+    if risk >= 70 and (
         not defenses.get("authGateway", False) or
         not defenses.get("firewall", False)
     ):
-        risk += 20
         detection = "Defense Bypass Attempt"
-        recommendation = "Enable security defenses immediately"
+        recommendation = "Enable all critical defenses immediately"
+        risk += 5  # small bump, not explosion
 
     # ---------------------------------
-    # Risk Normalization
+    # Step 5: Risk Normalization
     # ---------------------------------
-    risk = min(risk, 100)
+    risk = max(0, min(risk, 100))
 
     return risk, detection, recommendation
