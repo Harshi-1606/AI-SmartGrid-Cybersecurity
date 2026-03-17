@@ -5,7 +5,8 @@ def detect_grid_anomaly(load, generation, prev_load, grid_status, defenses):
     # ---------------------------------
     load_change = load - prev_load
     load_ratio = load / generation if generation > 0 else 0
-    instability = (grid_status == "INSTABILITY")
+    # Real-time instability detection (based on behavior)
+    instability = abs(load_change) > 40
 
     # ---------------------------------
     # Step 2: Primary Threat Detection
