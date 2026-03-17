@@ -57,6 +57,7 @@ class OperatorDashboardApp:
         # AI memory (used for anomaly detection)
         self.prev_load = 0
         self.prev_generation = 0
+        self.displayed_loads = {}
 
         # NEW response queue controller settings
         self.response_poll_interval_ms = getattr(self, "response_poll_interval_ms", 100)      # normal interval
@@ -800,27 +801,31 @@ class OperatorDashboardApp:
             attack_label = self.current_attack.upper()
 
         # --------------------------------
-        # AI Decision Engine
+        # AI Decision Engine (Improved)
         # --------------------------------
-        ai_decision = "No action required"
 
-        if "Load Injection" in detection:
-            ai_decision = "Enable Temporal Firewall"
+        if risk < 20:
+            ai_decision = "System Stable - No action required"
 
-        elif "Overload" in detection:
-            ai_decision = "Reduce Load Immediately"
+        elif 20 <= risk < 50:
+            ai_decision = "Monitor system closely"
 
-        elif "Instability" in detection:
-            ai_decision = "Stabilize Power Generation"
+        elif 50 <= risk < 75:
+            if "Instability" in detection:
+                ai_decision = "Stabilize power generation"
+            else:
+                ai_decision = "Investigate abnormal behavior"
 
-        elif "Coordinated Grid Attack" in detection:
-            ai_decision = "Activate All Defenses"
+        elif 75 <= risk < 90:
+            if "Overload" in detection:
+                ai_decision = "Reduce load immediately"
+            elif "Load Injection" in detection:
+                ai_decision = "Enable firewall and inspect meters"
+            else:
+                ai_decision = "Activate partial defenses"
 
-        elif "Defense Bypass" in detection:
-            ai_decision = "Enable All Defenses Immediately"
-
-        elif risk > 80:
-            ai_decision = "Activate All Defenses"
+        else:  # risk >= 90
+            ai_decision = "CRITICAL: Activate all defenses immediately"
 
         # Update Labels
         self.ai_last_detection_label.config(text=f"Detection: {detection} | Attack: {attack_label}")
@@ -1361,7 +1366,18 @@ class OperatorDashboardApp:
                         if key.startswith("meter_"):
                             meter_id = key
                             loc = key #using meter id as zone
-                            val = float(devices_data.get("power_consumption", 0.0))
+                            real_val = float(devices_data.get("power_consumption", 0.0))
+
+                            # Get previous displayed value
+                            prev_val = self.displayed_loads.get(meter_id, real_val)
+
+                            # Apply LERP smoothing
+                            smooth_val = prev_val + (real_val - prev_val) * 0.2
+
+                            # Store for next frame
+                            self.displayed_loads[meter_id] = smooth_val
+
+                            val = smooth_val
                             incoming[meter_id] = (loc, val)
 
                     # --- incremental treeview update (avoid full clear) ---
