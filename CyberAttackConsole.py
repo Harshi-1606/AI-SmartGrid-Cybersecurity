@@ -199,7 +199,7 @@ class CyberAttackApp:
             side="left", padx=10, expand=True, fill="x")
 
         ttk.Button(f, text="INDUCE INSTABILITY",
-                   command=lambda: self.send_attack("INDUCE_INSTABILITY")).pack(
+                   command=lambda: self.send_attack("INSTABILITY")).pack(
             side="left", padx=10, expand=True, fill="x")
 
         # ---------- TARGETED BLACKOUT ----------
