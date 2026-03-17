@@ -697,8 +697,16 @@ class OperatorDashboardApp:
         # Call cybersecurity detection algorithm
         grid_state = self.lbl_status.cget("text")
 
-        if hasattr(self, "current_attack") and self.current_attack == "INSTABILITY":
+        if hasattr(self, "current_attack") and "INSTABILITY" in self.current_attack:
             grid_state = "INSTABILITY"
+
+        # Fix initial spike issue
+        if self.prev_load == 0:
+            self.prev_load = load
+            self.prev_generation = generation
+            # Schedule next cycle before exiting
+            self.root.after(3000, self.simulate_ai_event)
+            return
 
         risk, detection, action = detect_grid_anomaly(
             load,
@@ -783,49 +791,40 @@ class OperatorDashboardApp:
         # detection = "Normal"
         # action = "Monitoring System"
 
-        self.ai_last_detection_label.config(text=f"Last Detection: {detection}")
-        self.ai_last_action_label.config(text=f"Last Action: {action}")
+        # self.ai_last_detection_label.config(text=f"Last Detection: {detection}")
+        # self.ai_last_action_label.config(text=f"Last Action: {action}")
 
         # Detection priority: Attack first
-        if hasattr(self, "current_attack"):
-            if self.current_attack.upper() == "BLACKOUT":
-                detection = "Grid Blackout Attack"
-                action = "Operator Intervention Required"
-            
-            elif self.current_attack.upper() == "LOAD_SPIKE" and detection == "Normal Operation":
-                detection = "Load Spike Attack"
-                action = "Investigating Load Surge"
-            
-            elif self.current_attack.upper() == "INSTABILITY" and detection == "Normal Operation":
-                detection = "Grid Instability Detected"
-                action = "Stabilizing System"
+        attack_label = "NONE"
 
-        # Critical risk recommendation
-        if risk > 85:
-            action = "CRITICAL THREAT - Enable Defenses Immediately"
+        if hasattr(self, "current_attack"):
+            attack_label = self.current_attack.upper()
 
         # --------------------------------
         # AI Decision Engine
         # --------------------------------
         ai_decision = "No action required"
 
-        if detection in ["Load Injection Attack", "Load Spike Attack"]:
+        if "Load Injection" in detection:
             ai_decision = "Enable Temporal Firewall"
 
-        elif detection == "Grid Overload Detected":
+        elif "Overload" in detection:
             ai_decision = "Reduce Load Immediately"
 
-        elif detection == "Grid Instability Attack":
+        elif "Instability" in detection:
             ai_decision = "Stabilize Power Generation"
 
-        elif detection == "Grid Offline Attack":
-            ai_decision = "Check Grid Connectivity"
+        elif "Coordinated Grid Attack" in detection:
+            ai_decision = "Activate All Defenses"
+
+        elif "Defense Bypass" in detection:
+            ai_decision = "Enable All Defenses Immediately"
 
         elif risk > 80:
             ai_decision = "Activate All Defenses"
 
         # Update Labels
-        self.ai_last_detection_label.config(text=f"Last Detection: {detection}")
+        self.ai_last_detection_label.config(text=f"Detection: {detection} | Attack: {attack_label}")
         self.ai_last_action_label.config(text=f"Last Action: {action}")
 
         # Log AI to feed
