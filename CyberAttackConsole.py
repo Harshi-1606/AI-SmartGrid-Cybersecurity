@@ -87,7 +87,7 @@ class CyberAttackApp:
         """Called ONLY when user clicks a button"""
 
         # Defense system blocks attacks
-        if self.defenses_active and cmd in ("BLACKOUT", "SIMULATE_DDOS", "INDUCE_INSTABILITY"):
+        if self.defenses_active and cmd in ("BLACKOUT", "SIMULATE_DDOS", "INSTABILITY"):
             self.log(f"⚠ BLOCKED: Defense system active. Cannot execute {cmd}.", "err")
             return
 
