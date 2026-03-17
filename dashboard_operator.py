@@ -697,8 +697,7 @@ class OperatorDashboardApp:
         # Call cybersecurity detection algorithm
         grid_state = self.lbl_status.cget("text")
 
-        if hasattr(self, "current_attack") and "INSTABILITY" in self.current_attack:
-            grid_state = "INSTABILITY"
+        
 
         # Fix initial spike issue
         if self.prev_load == 0:
