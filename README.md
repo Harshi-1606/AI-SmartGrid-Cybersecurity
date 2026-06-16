@@ -74,3 +74,43 @@ Simulation          (Monitoring & Control)
                   • Anomaly Detection
 
 ```
+
+## Cyber Attacks Simulated
+
+- Meter Tampering Attack
+- Targeted Blackout Attack
+- Grid-Wide Blackout Attack
+- Load Injection Attack
+- Grid Instability Attack
+- Reconnaissance / Data Interception Attack
+
+Each attack is launched through a dedicated attacker console and transmitted through Firebase to the Unity smart grid simulation.
+
+## Defense Mechanisms
+
+The platform implements multiple defensive layers:
+
+- Authentication Gateway
+- Temporal Firewall
+- AI-Based Anomaly Detection
+- Automated Threat Analysis
+- Grid Recovery Mechanisms
+
+The operator can enable and disable defenses in real time through the monitoring dashboard.
+
+## AI Threat Detection Engine
+
+The AI module continuously evaluates:
+
+- Grid load changes
+- Power generation levels
+- System stability
+- Active defense status
+
+The engine generates:
+
+- Risk Score (0–100)
+- Threat Classification
+- Recommended Response Actions
+
+This allows operators to identify abnormal grid behavior before critical failures occur.
