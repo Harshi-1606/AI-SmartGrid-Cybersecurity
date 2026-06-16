@@ -2,7 +2,7 @@
 
 🏆 2nd Place Winning Final Year Project
 
-A real-time smart grid cybersecurity platform that simulates cyber attacks on power infrastructure and demonstrates AI-driven threat detection and defense mechanisms.
+A real-time smart grid cybersecurity platform built using Unity, Firebase, Python, and AI-driven anomaly detection. The system simulates cyber attacks against critical power infrastructure and demonstrates automated threat detection, defense activation, and grid recovery mechanisms.
 
 ## Technologies Used
 
@@ -34,3 +34,43 @@ This project demonstrates how artificial intelligence and layered cybersecurity 
 
 The system consists of a Unity-based smart grid simulation, a Firebase communication layer, an operator dashboard for monitoring grid health, and a cyber attack console used to simulate malicious activity.
 
+## Project Components
+
+### Unity Smart Grid Simulation
+Simulates a smart city power grid with smart meters, lights, generation systems, and real-time grid behavior.
+
+### Operator Dashboard
+A Python-based monitoring console that allows operators to monitor grid status, activate defenses, and analyze threats.
+
+### Cyber Attack Console
+A Python-based attacker interface used to simulate cyber attacks such as blackouts, meter tampering, load injection, and reconnaissance attacks.
+
+### AI Threat Detection Engine
+Analyzes grid load patterns, generation data, and defense status to calculate risk scores and identify anomalous behavior.
+
+### Firebase Realtime Database
+Acts as the communication layer between the simulation, dashboards, and attack modules.
+
+## System Architecture
+
+```text
+Cyber Attack Console
+        │
+        ▼
+Firebase Realtime Database
+        │
+ ┌──────┼────────────────────┐
+ ▼                           ▼
+Unity Smart Grid    Operator Dashboard
+Simulation          (Monitoring & Control)
+                         │
+                         ▼
+                  AI Detection Engine
+                         │
+                         ▼
+                  Defense Mechanisms
+                  • Authentication Gateway
+                  • Temporal Firewall
+                  • Anomaly Detection
+
+```
