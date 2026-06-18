@@ -4,7 +4,7 @@
 
 A real-time smart grid cybersecurity platform built using Unity, Firebase, Python, and AI-driven anomaly detection. The system simulates cyber attacks against critical power infrastructure and demonstrates automated threat detection, defense activation, and grid recovery mechanisms.
 
-## Technologies Used
+## Tech Stack
 
 - Unity 3D
 - Firebase Realtime Database
@@ -34,7 +34,7 @@ This project demonstrates how artificial intelligence and layered cybersecurity 
 
 The system consists of a Unity-based smart grid simulation, a Firebase communication layer, an operator dashboard for monitoring grid health, and a cyber attack console used to simulate malicious activity.
 
-## Project Components
+## System Components
 
 ### Unity Smart Grid Simulation
 Simulates a smart city power grid with smart meters, lights, generation systems, and real-time grid behavior.
