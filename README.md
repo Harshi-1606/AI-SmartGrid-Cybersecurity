@@ -114,3 +114,37 @@ The engine generates:
 - Recommended Response Actions
 
 This allows operators to identify abnormal grid behavior before critical failures occur.
+
+## Screenshots
+
+### Unity Smart Grid Simulation
+
+#### Lights ON
+
+![Unity Lights ON](Assets/Screenshots/Unity_Scene_LightsON.png)
+
+#### Lights OFF
+
+![Unity Lights OFF](Assets/Screenshots/Unity_Scene_LightsOFF.png)
+
+### Operator Dashboard
+
+![Operator Dashboard](Assets/Screenshots/Operator_Dashboard.png)
+
+### Defense Systems Enabled
+
+![Defense Enabled](Assets/Screenshots/Operator_Dashboard_Defense_Enabled.png)
+
+### Blackout Attack Demonstration
+
+#### Operator Dashboard View
+
+![Blackout Dashboard](Assets/Screenshots/Operator_Dashboard_Blackout_Attack.png)
+
+#### Unity Smart Grid View
+
+![Blackout Unity](Assets/Screenshots/Unity_Scene_Blackout_Attack.png)
+
+### Firebase Infrastructure
+
+![Firebase](Assets/Screenshots/Firebase.png)
