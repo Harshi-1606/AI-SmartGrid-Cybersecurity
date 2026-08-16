@@ -148,6 +148,11 @@ public class LightController : MonoBehaviour
         {
             lightRef.Child("state").ValueChanged -= OnLightChanged;
         }
+
+        if (meterRef != null)
+        {
+            meterRef.Child("blackout").ValueChanged -= OnMeterBlackoutChanged;
+        }
     }
 }
 
