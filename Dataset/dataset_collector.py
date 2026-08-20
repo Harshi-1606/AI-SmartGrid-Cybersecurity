@@ -3,6 +3,7 @@ import csv
 import os
 import time
 from datetime import datetime, timezone
+import sys
 
 
 # ============================================================
@@ -23,6 +24,14 @@ OUTPUT_FILE = os.path.join(
 )
 
 SAMPLE_INTERVAL = 2  # seconds
+
+# Experiment Scenario
+if len(sys.argv) > 1:
+    SCENARIO = sys.argv[1].upper()
+else:
+    SCENARIO = "NORMAL"
+
+print(f"Experiment scenario: {SCENARIO}")
 
 
 # ============================================================
@@ -179,13 +188,14 @@ def create_dataset_row(data):
     # Dataset label
     # --------------------------------------------------------
 
-    if attack and attack != "NONE":
-        label = 1
-    else:
+    if SCENARIO == "NORMAL":
         label = 0
+    else:
+        label = 1
 
     row = {
         "timestamp": timestamp,
+        "scenario": SCENARIO,
 
         "total_load_kw": total_load,
         "total_generation_kw": total_generation,
